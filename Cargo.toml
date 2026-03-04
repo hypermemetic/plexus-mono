@@ -1,0 +1,50 @@
+[package]
+name = "plexus-mono"
+version = "0.1.0"
+edition = "2021"
+description = "Monochrome music API Plexus RPC activation — search, metadata, lyrics, and recommendations"
+license = "MIT"
+
+[lib]
+name = "plexus_mono"
+path = "src/lib.rs"
+
+[[bin]]
+name = "plexus-mono"
+path = "src/bin/plexus_mono.rs"
+
+[dependencies]
+# Plexus RPC framework
+plexus-core = "0.3.0"
+plexus-macros = "0.3.0"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+async-stream = "0.3"
+futures = "0.3"
+
+# Serialization + schema
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = { version = "1.1", features = ["derive"] }
+
+# Required by plexus-macros generated code
+async-trait = "0.1"
+jsonrpsee = { version = "0.26", features = ["server", "macros"] }
+uuid = { version = "1.6", features = ["v4", "v5"] }
+
+# HTTP client for Monochrome API
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Base64 decoding for stream manifests
+base64 = "0.22"
+
+# Logging
+tracing = "0.1"
+
+# Standalone server
+plexus-transport = "0.1.0"
+clap = { version = "4", features = ["derive", "env"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+chrono = "0.4"
+anyhow = "1"
