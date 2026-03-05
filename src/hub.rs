@@ -366,6 +366,42 @@ impl MonoHub {
         }
     }
 
+    /// Add an entire album to the playback queue
+    #[plexus_macros::hub_method(
+        streaming,
+        description = "Add all tracks from an album to the queue. Auto-starts if nothing is playing.",
+        params(
+            id = "Tidal album ID",
+            quality = "Quality: LOSSLESS (default), HI_RES_LOSSLESS, HIGH, LOW"
+        )
+    )]
+    pub async fn queue_album(
+        &self,
+        id: u64,
+        quality: Option<String>,
+    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        let quality = quality.unwrap_or_else(|| "LOSSLESS".to_string());
+        stream! {
+            match player.queue_album(id, &quality).await {
+                Ok(tracks) => {
+                    let count = tracks.len();
+                    yield MonoEvent::PlayerAck {
+                        action: "queue_album".to_string(),
+                        message: format!("{count} tracks queued"),
+                    };
+                    // Also emit the queue state
+                    let current_index = Some(0usize);
+                    yield MonoEvent::Queue {
+                        tracks,
+                        current_index,
+                    };
+                }
+                Err(e) => yield MonoEvent::Error { message: e },
+            }
+        }
+    }
+
     /// Add a track to the playback queue
     #[plexus_macros::hub_method(
         description = "Add a track to the end of the playback queue. Auto-starts if nothing is playing.",

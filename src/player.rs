@@ -468,6 +468,66 @@ impl Player {
         }
     }
 
+    /// Add all tracks from an album to the queue. Auto-starts if idle.
+    pub async fn queue_album(&self, album_id: u64, quality: &str) -> Result<Vec<QueuedTrack>, String> {
+        let (_album_event, track_events) = self.client.album(album_id).await?;
+
+        let mut queued_tracks = Vec::new();
+        for event in &track_events {
+            if let MonoEvent::AlbumTrack { id, title, artist, duration_secs, .. } = event {
+                queued_tracks.push(QueuedTrack {
+                    id: *id,
+                    title: title.clone(),
+                    artist: artist.clone(),
+                    album: String::new(), // filled below
+                    duration_secs: *duration_secs,
+                    quality: quality.to_string(),
+                    cover_id: None,
+                });
+            }
+        }
+
+        // Get album name from the album event
+        let album_name = if let MonoEvent::Album { title, cover_id, .. } = &_album_event {
+            for t in &mut queued_tracks {
+                t.album = title.clone();
+                t.cover_id = cover_id.clone();
+            }
+            title.clone()
+        } else {
+            format!("Album {album_id}")
+        };
+
+        if queued_tracks.is_empty() {
+            return Err(format!("no tracks found in album {album_name}"));
+        }
+
+        let should_start = {
+            let mut inner = self.inner.lock().await;
+            let idle = matches!(inner.status, PlayStatus::Idle | PlayStatus::Stopped);
+            if idle {
+                // Queue all but the first; we'll start the first directly
+                for t in queued_tracks.iter().skip(1) {
+                    inner.queue.push_back(t.clone());
+                }
+                true
+            } else {
+                for t in &queued_tracks {
+                    inner.queue.push_back(t.clone());
+                }
+                false
+            }
+        };
+
+        if should_start {
+            self.start_playback(queued_tracks[0].clone()).await?;
+        } else {
+            self.broadcast_now_playing().await;
+        }
+
+        Ok(queued_tracks)
+    }
+
     /// Clear the queue (does not stop current track)
     pub async fn queue_clear(&self) {
         let mut inner = self.inner.lock().await;
