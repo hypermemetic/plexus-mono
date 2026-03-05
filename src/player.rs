@@ -3,7 +3,7 @@
 //! All rodio interaction is isolated to a single OS thread (OutputStream is !Send).
 //! The Sink is Send+Sync and shared via Arc for control from async code.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,6 +11,12 @@ use tokio::sync::{watch, Mutex};
 
 use crate::client::MonoClient;
 use crate::types::{MonoEvent, PlayStatus, QueuedTrack};
+
+/// Helper trait to erase the concrete StreamDownload type behind Box.
+/// Rust doesn't allow `dyn Read + Seek + Send` (multiple non-auto traits),
+/// so we combine them into one trait and blanket-implement it.
+trait ReadSeekSend: std::io::Read + std::io::Seek + Send + Sync {}
+impl<T: std::io::Read + std::io::Seek + Send + Sync> ReadSeekSend for T {}
 
 /// Snapshot of current playback state, broadcast via watch channel
 #[derive(Debug, Clone)]
@@ -48,6 +54,10 @@ struct PlayerInner {
     status: PlayStatus,
     volume: f32,
     history: Vec<QueuedTrack>,
+    /// Pre-buffered audio readers keyed by track ID.
+    /// Each entry is a StreamDownload that's already connected and downloading.
+    /// Dropped automatically when removed (temp file cleaned up via RAII).
+    prefetched: HashMap<u64, Box<dyn ReadSeekSend>>,
 }
 
 /// Audio playback engine with queue and controls
@@ -90,6 +100,7 @@ impl Player {
                 status: PlayStatus::Idle,
                 volume: 1.0,
                 history: Vec::new(),
+                prefetched: HashMap::new(),
             }),
             now_playing_tx,
             now_playing_rx,
@@ -145,6 +156,28 @@ impl Player {
                         drop(inner);
                         this.broadcast_now_playing().await;
                     }
+                }
+            }
+        });
+
+        // Prefetch watcher — pre-buffers queued tracks when playing
+        let weak = Arc::downgrade(&player);
+        tokio::spawn(async move {
+            let mut last_track_id: Option<u64> = None;
+            loop {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let Some(this) = weak.upgrade() else { break };
+                let current_id = {
+                    let inner = this.inner.lock().await;
+                    if !matches!(inner.status, PlayStatus::Playing) {
+                        continue;
+                    }
+                    inner.current_track.as_ref().map(|t| t.id)
+                };
+                // Prefetch when track changes or on first play
+                if current_id != last_track_id {
+                    last_track_id = current_id;
+                    this.prefetch_queue().await;
                 }
             }
         });
@@ -296,7 +329,6 @@ impl Player {
     }
 
     /// Resolve stream URL, create decoder, and start playback on the sink.
-    /// Assumes status is already set to Buffering and current_track is set.
     async fn start_playback(&self, track: QueuedTrack) -> Result<(), String> {
         {
             let mut inner = self.inner.lock().await;
@@ -305,22 +337,34 @@ impl Player {
         }
         self.broadcast_now_playing().await;
 
-        // Resolve CDN URL
-        let manifest = self.client.stream_manifest(track.id, &track.quality).await?;
-        let url = match &manifest {
-            MonoEvent::StreamManifest { url, .. } => url.clone(),
-            _ => return Err("unexpected manifest type".to_string()),
+        // Check for a pre-buffered reader first
+        let prefetched: Option<Box<dyn ReadSeekSend>> = {
+            let mut inner = self.inner.lock().await;
+            inner.prefetched.remove(&track.id)
         };
 
-        // Create streaming reader (async HTTP → Read+Seek buffer)
-        let reader = stream_download::StreamDownload::new_http(
-            url.parse::<reqwest::Url>()
-                .map_err(|e| format!("bad stream url: {e}"))?,
-            stream_download::storage::temp::TempStorageProvider::new(),
-            stream_download::Settings::default(),
-        )
-        .await
-        .map_err(|e| format!("stream download error: {e}"))?;
+        let reader: Box<dyn ReadSeekSend> = if let Some(r) = prefetched {
+            tracing::debug!("using prefetched audio for track {}", track.id);
+            r
+        } else {
+            // Resolve CDN URL
+            let manifest = self.client.stream_manifest(track.id, &track.quality).await?;
+            let url = match &manifest {
+                MonoEvent::StreamManifest { url, .. } => url.clone(),
+                _ => return Err("unexpected manifest type".to_string()),
+            };
+
+            // Create streaming reader (async HTTP → Read+Seek buffer)
+            let r = stream_download::StreamDownload::new_http(
+                url.parse::<reqwest::Url>()
+                    .map_err(|e| format!("bad stream url: {e}"))?,
+                stream_download::storage::temp::TempStorageProvider::new(),
+                stream_download::Settings::default(),
+            )
+            .await
+            .map_err(|e| format!("stream download error: {e}"))?;
+            Box::new(r)
+        };
 
         // Decode on blocking thread (reads file headers from network buffer)
         let source = tokio::task::spawn_blocking(move || rodio::Decoder::new(reader))
@@ -388,6 +432,7 @@ impl Player {
             inner.history.push(current);
         }
         inner.status = PlayStatus::Stopped;
+        inner.prefetched.clear(); // Drop all pre-buffered temp files
         drop(inner);
         self.broadcast_now_playing().await;
     }
@@ -532,6 +577,7 @@ impl Player {
     pub async fn queue_clear(&self) {
         let mut inner = self.inner.lock().await;
         inner.queue.clear();
+        inner.prefetched.clear(); // Drop all pre-buffered temp files
         drop(inner);
         self.broadcast_now_playing().await;
     }
@@ -557,6 +603,59 @@ impl Player {
         let track = inner.queue.remove(from).unwrap();
         inner.queue.insert(to, track);
         Ok(())
+    }
+
+    /// Pre-buffer queued tracks by resolving their stream URLs and starting downloads.
+    /// Each StreamDownload writes to a temp file (cleaned up on drop via RAII).
+    async fn prefetch_queue(&self) {
+        let tracks: Vec<QueuedTrack> = {
+            let inner = self.inner.lock().await;
+            inner
+                .queue
+                .iter()
+                .filter(|t| !inner.prefetched.contains_key(&t.id))
+                .take(10)
+                .cloned()
+                .collect()
+        };
+
+        for track in tracks {
+            // Resolve manifest
+            let manifest = match self.client.stream_manifest(track.id, &track.quality).await {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::debug!("prefetch manifest failed for {}: {e}", track.id);
+                    continue;
+                }
+            };
+            let url = match &manifest {
+                MonoEvent::StreamManifest { url, .. } => url.clone(),
+                _ => continue,
+            };
+            let parsed = match url.parse::<reqwest::Url>() {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+
+            // Start download — the temp file will buffer audio in the background
+            let reader = match stream_download::StreamDownload::new_http(
+                parsed,
+                stream_download::storage::temp::TempStorageProvider::new(),
+                stream_download::Settings::default(),
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::debug!("prefetch download failed for {}: {e}", track.id);
+                    continue;
+                }
+            };
+
+            tracing::debug!("prefetched track {} ({})", track.id, track.title);
+            let mut inner = self.inner.lock().await;
+            inner.prefetched.insert(track.id, Box::new(reader));
+        }
     }
 
     /// Subscribe to now-playing updates
