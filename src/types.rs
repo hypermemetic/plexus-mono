@@ -203,6 +203,44 @@ pub enum MonoEvent {
         duration_secs: Option<f32>,
     },
 
+    /// Current playback state — streamed ~1s via now_playing
+    NowPlaying {
+        /// Currently playing track ID
+        track_id: Option<u64>,
+        /// Track title
+        title: Option<String>,
+        /// Artist name
+        artist: Option<String>,
+        /// Album title
+        album: Option<String>,
+        /// Player state
+        status: PlayStatus,
+        /// Current position in seconds
+        position_secs: f32,
+        /// Total duration in seconds
+        duration_secs: f32,
+        /// Volume level 0.0–1.0
+        volume: f32,
+        /// Number of tracks in queue
+        queue_length: usize,
+    },
+
+    /// Queue contents snapshot
+    Queue {
+        /// Tracks in queue (current + upcoming)
+        tracks: Vec<QueuedTrack>,
+        /// Index of the currently playing track (if any)
+        current_index: Option<usize>,
+    },
+
+    /// Acknowledgement of a player action
+    PlayerAck {
+        /// Action that was performed
+        action: String,
+        /// Human-readable message
+        message: String,
+    },
+
     /// Error from any method
     Error {
         /// Human-readable error description
@@ -214,14 +252,41 @@ pub enum MonoEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PlayStatus {
+    /// No track loaded
+    Idle,
     /// Player process spawned, buffering/starting
     Starting,
+    /// Buffering audio data from network
+    Buffering,
     /// Currently playing
     Playing,
+    /// Playback paused
+    Paused,
+    /// Playback stopped by user
+    Stopped,
     /// Playback finished cleanly
     Finished,
     /// Player exited with an error
     Failed,
+}
+
+/// A track in the playback queue
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct QueuedTrack {
+    /// Tidal track ID
+    pub id: u64,
+    /// Track title
+    pub title: String,
+    /// Primary artist name
+    pub artist: String,
+    /// Album title
+    pub album: String,
+    /// Duration in seconds
+    pub duration_secs: u64,
+    /// Quality tier requested
+    pub quality: String,
+    /// Cover art UUID
+    pub cover_id: Option<String>,
 }
 
 /// Search target kind

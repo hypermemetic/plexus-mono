@@ -1,6 +1,6 @@
 [package]
 name = "plexus-mono"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Monochrome music API Plexus RPC activation — search, metadata, lyrics, and recommendations"
 license = "MIT"
@@ -38,6 +38,13 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 
 # Base64 decoding for stream manifests
 base64 = "0.22"
+
+# Audio playback
+rodio = { version = "0.20", default-features = false, features = ["symphonia-all"] }
+stream-download = { version = "0.9", features = ["reqwest"] }
+
+# OS media controls (play/pause keys, Now Playing widget)
+souvlaki = "0.8"
 
 # Logging
 tracing = "0.1"

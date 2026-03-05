@@ -1,50 +1,44 @@
 //! MonoHub — Plexus RPC activation for the Monochrome music API
 //!
 //! Wraps the Monochrome / Hi-Fi Tidal proxy API and exposes track metadata,
-//! album listings, artist info, search, lyrics, recommendations, and cover art
-//! as streaming Plexus RPC methods.
+//! album listings, artist info, search, lyrics, recommendations, cover art,
+//! and full playback controls as streaming Plexus RPC methods.
 
 use async_stream::stream;
 use futures::Stream;
 use std::sync::Arc;
 
 use crate::client::MonoClient;
-use crate::types::{MonoEvent, PlayStatus, SearchKind};
+use crate::player::Player;
+use crate::types::{MonoEvent, SearchKind};
 
-/// Monochrome music API activation — stateless except for the HTTP client.
+/// Monochrome music API activation with playback engine.
 #[derive(Clone)]
 pub struct MonoHub {
     client: Arc<MonoClient>,
+    player: Arc<Player>,
 }
 
 impl MonoHub {
     /// Create a hub targeting the default Monochrome API instance.
-    pub fn new() -> Self {
-        Self {
-            client: Arc::new(MonoClient::default_instance()),
-        }
+    pub async fn new() -> Self {
+        let client = Arc::new(MonoClient::default_instance());
+        let player = Player::new(client.clone()).await;
+        Self { client, player }
     }
 
     /// Create a hub targeting a specific API base URL (no trailing slash).
-    ///
-    /// Example: `MonoHub::with_url("https://monochrome-api.samidy.com")`
-    pub fn with_url(base_url: impl Into<String>) -> Self {
-        Self {
-            client: Arc::new(MonoClient::new(base_url)),
-        }
-    }
-}
-
-impl Default for MonoHub {
-    fn default() -> Self {
-        Self::new()
+    pub async fn with_url(base_url: impl Into<String>) -> Self {
+        let client = Arc::new(MonoClient::new(base_url));
+        let player = Player::new(client.clone()).await;
+        Self { client, player }
     }
 }
 
 #[plexus_macros::hub_methods(
     namespace = "mono",
-    version = "0.1.0",
-    description = "Monochrome music API — track metadata, search, lyrics, and recommendations",
+    version = "0.2.0",
+    description = "Monochrome music API — track metadata, search, lyrics, recommendations, and playback",
     crate_path = "plexus_core"
 )]
 impl MonoHub {
@@ -248,13 +242,12 @@ impl MonoHub {
         }
     }
 
-    /// Play a track via mpv (ephemeral — no file saved)
+    /// Play a track immediately (stops current playback)
     #[plexus_macros::hub_method(
-        streaming,
-        description = "Play a track via mpv. Streams PlaybackStatus events for the duration of playback.",
+        description = "Play a track through speakers. Stops any current playback.",
         params(
             id = "Tidal track ID",
-            quality = "Quality: LOSSLESS (default), HIGH, LOW"
+            quality = "Quality: LOSSLESS (default), HI_RES_LOSSLESS, HIGH, LOW"
         )
     )]
     pub async fn play(
@@ -262,103 +255,241 @@ impl MonoHub {
         id: u64,
         quality: Option<String>,
     ) -> impl Stream<Item = MonoEvent> + Send + 'static {
-        let client = self.client.clone();
+        let player = self.player.clone();
         let quality = quality.unwrap_or_else(|| "LOSSLESS".to_string());
         stream! {
-            // Resolve manifest first
-            let manifest = match client.stream_manifest(id, &quality).await {
-                Ok(m) => m,
-                Err(e) => {
-                    yield MonoEvent::Error { message: e };
-                    return;
-                }
-            };
-
-            let url = match &manifest {
-                MonoEvent::StreamManifest { url, .. } => url.clone(),
-                _ => {
-                    yield MonoEvent::Error { message: "unexpected manifest type".to_string() };
-                    return;
-                }
-            };
-
-            yield manifest;
-
-            yield MonoEvent::PlaybackStatus {
-                status: PlayStatus::Starting,
-                elapsed_secs: None,
-                duration_secs: None,
-            };
-
-            // Spawn mpv. Use --term-status-msg for parseable position output.
-            let result = tokio::process::Command::new("mpv")
-                .args([
-                    "--no-video",
-                    "--quiet",
-                    "--term-status-msg=${time-pos}/${duration}",
-                    &url,
-                ])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::piped())
-                .spawn();
-
-            let mut child = match result {
-                Ok(c) => c,
-                Err(e) => {
-                    yield MonoEvent::Error {
-                        message: format!("failed to spawn mpv: {e}"),
-                    };
-                    return;
-                }
-            };
-
-            yield MonoEvent::PlaybackStatus {
-                status: PlayStatus::Playing,
-                elapsed_secs: None,
-                duration_secs: None,
-            };
-
-            // Read mpv stderr: collect all lines, parse progress from status lines.
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            let mut stderr_lines: Vec<String> = Vec::new();
-            if let Some(stderr) = child.stderr.take() {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    // mpv writes "HH:MM:SS.ss/HH:MM:SS.ss" via --term-status-msg
-                    if let Some((elapsed, duration)) = parse_mpv_status(&line) {
-                        yield MonoEvent::PlaybackStatus {
-                            status: PlayStatus::Playing,
-                            elapsed_secs: Some(elapsed),
-                            duration_secs: Some(duration),
-                        };
-                    } else {
-                        stderr_lines.push(line);
-                    }
-                }
+            match player.play_track(id, &quality).await {
+                Ok(()) => yield MonoEvent::PlayerAck {
+                    action: "play".to_string(),
+                    message: format!("playing track {id}"),
+                },
+                Err(e) => yield MonoEvent::Error { message: e },
             }
+        }
+    }
 
-            let exit = child.wait().await;
-            match exit {
-                Ok(status) if status.success() => {
-                    yield MonoEvent::PlaybackStatus {
-                        status: PlayStatus::Finished,
-                        elapsed_secs: None,
-                        duration_secs: None,
-                    };
-                }
-                Ok(status) => {
-                    let detail = if stderr_lines.is_empty() {
-                        format!("mpv exited with {status}")
-                    } else {
-                        format!("mpv exited with {status}: {}", stderr_lines.join("; "))
-                    };
-                    yield MonoEvent::Error { message: detail };
-                }
-                Err(e) => {
-                    yield MonoEvent::Error {
-                        message: format!("mpv wait failed: {e}"),
-                    };
-                }
+    /// Pause playback
+    #[plexus_macros::hub_method(
+        description = "Pause the current playback"
+    )]
+    pub async fn pause(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        stream! {
+            player.pause().await;
+            yield MonoEvent::PlayerAck {
+                action: "pause".to_string(),
+                message: "playback paused".to_string(),
+            };
+        }
+    }
+
+    /// Resume playback
+    #[plexus_macros::hub_method(
+        description = "Resume paused playback"
+    )]
+    pub async fn resume(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        stream! {
+            player.resume().await;
+            yield MonoEvent::PlayerAck {
+                action: "resume".to_string(),
+                message: "playback resumed".to_string(),
+            };
+        }
+    }
+
+    /// Stop playback
+    #[plexus_macros::hub_method(
+        description = "Stop playback and clear current track"
+    )]
+    pub async fn stop(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        stream! {
+            player.stop().await;
+            yield MonoEvent::PlayerAck {
+                action: "stop".to_string(),
+                message: "playback stopped".to_string(),
+            };
+        }
+    }
+
+    /// Skip to next track in queue
+    #[plexus_macros::hub_method(
+        description = "Skip to the next track in the queue"
+    )]
+    pub async fn next(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        stream! {
+            match player.next().await {
+                Ok(()) => yield MonoEvent::PlayerAck {
+                    action: "next".to_string(),
+                    message: "skipped to next track".to_string(),
+                },
+                Err(e) => yield MonoEvent::Error { message: e },
+            }
+        }
+    }
+
+    /// Go to previous track
+    #[plexus_macros::hub_method(
+        description = "Go back to the previous track"
+    )]
+    pub async fn previous(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        stream! {
+            match player.previous().await {
+                Ok(()) => yield MonoEvent::PlayerAck {
+                    action: "previous".to_string(),
+                    message: "went to previous track".to_string(),
+                },
+                Err(e) => yield MonoEvent::Error { message: e },
+            }
+        }
+    }
+
+    /// Set volume level
+    #[plexus_macros::hub_method(
+        description = "Set playback volume",
+        params(level = "Volume level from 0.0 (mute) to 1.0 (full)")
+    )]
+    pub async fn volume(
+        &self,
+        level: f32,
+    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        stream! {
+            player.set_volume(level).await;
+            yield MonoEvent::PlayerAck {
+                action: "volume".to_string(),
+                message: format!("volume set to {:.0}%", level * 100.0),
+            };
+        }
+    }
+
+    /// Add a track to the playback queue
+    #[plexus_macros::hub_method(
+        description = "Add a track to the end of the playback queue. Auto-starts if nothing is playing.",
+        params(
+            id = "Tidal track ID",
+            quality = "Quality: LOSSLESS (default), HI_RES_LOSSLESS, HIGH, LOW"
+        )
+    )]
+    pub async fn queue_add(
+        &self,
+        id: u64,
+        quality: Option<String>,
+    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        let quality = quality.unwrap_or_else(|| "LOSSLESS".to_string());
+        stream! {
+            match player.queue_add(id, &quality).await {
+                Ok(()) => yield MonoEvent::PlayerAck {
+                    action: "queue_add".to_string(),
+                    message: format!("track {id} added to queue"),
+                },
+                Err(e) => yield MonoEvent::Error { message: e },
+            }
+        }
+    }
+
+    /// Clear the playback queue
+    #[plexus_macros::hub_method(
+        description = "Clear all tracks from the queue (does not stop current track)"
+    )]
+    pub async fn queue_clear(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        stream! {
+            player.queue_clear().await;
+            yield MonoEvent::PlayerAck {
+                action: "queue_clear".to_string(),
+                message: "queue cleared".to_string(),
+            };
+        }
+    }
+
+    /// List queue contents
+    #[plexus_macros::hub_method(
+        description = "Get the current queue contents including the now-playing track"
+    )]
+    pub async fn queue_get(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        stream! {
+            let (current, upcoming) = player.queue_get().await;
+            let current_index = if current.is_some() { Some(0usize) } else { None };
+            let mut tracks = Vec::new();
+            if let Some(c) = current {
+                tracks.push(c);
+            }
+            tracks.extend(upcoming);
+            yield MonoEvent::Queue {
+                tracks,
+                current_index,
+            };
+        }
+    }
+
+    /// Reorder tracks in the queue
+    #[plexus_macros::hub_method(
+        description = "Move a track within the queue",
+        params(
+            from = "Source index in the queue (0-based)",
+            to = "Destination index in the queue (0-based)"
+        )
+    )]
+    pub async fn queue_reorder(
+        &self,
+        from: u32,
+        to: u32,
+    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        stream! {
+            match player.queue_reorder(from as usize, to as usize).await {
+                Ok(()) => yield MonoEvent::PlayerAck {
+                    action: "queue_reorder".to_string(),
+                    message: format!("moved track from position {from} to {to}"),
+                },
+                Err(e) => yield MonoEvent::Error { message: e },
+            }
+        }
+    }
+
+    /// Stream now-playing updates (~1s while playing)
+    #[plexus_macros::hub_method(
+        streaming,
+        description = "Stream real-time playback position and status updates (~1s interval while playing)"
+    )]
+    pub async fn now_playing(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let mut rx = self.player.subscribe_now_playing();
+        stream! {
+            // Emit current state immediately
+            {
+                let np = rx.borrow().clone();
+                yield MonoEvent::NowPlaying {
+                    track_id: np.track_id,
+                    title: np.title,
+                    artist: np.artist,
+                    album: np.album,
+                    status: np.status,
+                    position_secs: np.position_secs,
+                    duration_secs: np.duration_secs,
+                    volume: np.volume,
+                    queue_length: np.queue_length,
+                };
+            }
+            // Then stream updates
+            while rx.changed().await.is_ok() {
+                let np = rx.borrow().clone();
+                yield MonoEvent::NowPlaying {
+                    track_id: np.track_id,
+                    title: np.title,
+                    artist: np.artist,
+                    album: np.album,
+                    status: np.status,
+                    position_secs: np.position_secs,
+                    duration_secs: np.duration_secs,
+                    volume: np.volume,
+                    queue_length: np.queue_length,
+                };
             }
         }
     }
@@ -388,42 +519,5 @@ impl MonoHub {
                 Err(e) => yield MonoEvent::Error { message: e },
             }
         }
-    }
-}
-
-/// Parse mpv status lines. Handles two formats:
-/// - `--term-status-msg` output: "HH:MM:SS/HH:MM:SS"
-/// - Default AV line: "AV: HH:MM:SS / HH:MM:SS (X%)" or "A: HH:MM:SS / HH:MM:SS (X%)"
-fn parse_mpv_status(line: &str) -> Option<(f32, f32)> {
-    let line = line.trim();
-    // Strip control chars and leading "AV: " / "A: " / "KA: " prefixes
-    let line = line
-        .trim_start_matches(|c: char| !c.is_ascii_digit() && c != ':')
-        .trim();
-    let (a, rest) = line.split_once('/')?;
-    // Duration may be followed by " (X%)" — take up to space or end
-    let b = rest.trim().split_whitespace().next().unwrap_or(rest.trim());
-    let elapsed = parse_mpv_time(a.trim())?;
-    let duration = parse_mpv_time(b)?;
-    Some((elapsed, duration))
-}
-
-/// Parse mpv time format: "HH:MM:SS.ss" or "SS.ss" → seconds.
-fn parse_mpv_time(s: &str) -> Option<f32> {
-    let parts: Vec<&str> = s.split(':').collect();
-    match parts.as_slice() {
-        [ss] => ss.parse().ok(),
-        [mm, ss] => {
-            let m: f32 = mm.parse().ok()?;
-            let s: f32 = ss.parse().ok()?;
-            Some(m * 60.0 + s)
-        }
-        [hh, mm, ss] => {
-            let h: f32 = hh.parse().ok()?;
-            let m: f32 = mm.parse().ok()?;
-            let s: f32 = ss.parse().ok()?;
-            Some(h * 3600.0 + m * 60.0 + s)
-        }
-        _ => None,
     }
 }

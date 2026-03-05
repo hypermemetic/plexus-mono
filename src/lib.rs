@@ -6,6 +6,7 @@
 
 pub mod client;
 pub mod hub;
+pub mod player;
 pub mod types;
 
 // Required by plexus-macros generated code

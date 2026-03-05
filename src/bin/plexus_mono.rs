@@ -9,7 +9,7 @@ use std::sync::Arc;
 #[derive(Parser, Debug)]
 #[command(name = "plexus-mono")]
 #[command(
-    about = "Monochrome music API standalone Plexus RPC server — search, metadata, lyrics, recommendations"
+    about = "Monochrome music API standalone Plexus RPC server — search, metadata, lyrics, recommendations, playback"
 )]
 struct Args {
     /// Run in stdio mode for MCP compatibility (line-delimited JSON-RPC over stdin/stdout)
@@ -32,8 +32,7 @@ struct Args {
     api_url: Option<String>,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     // Tracing setup — suppress noise in stdio mode
@@ -53,16 +52,40 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Starting plexus-mono at {}", chrono::Utc::now());
 
-    // Build the activation
-    let mono_hub = match args.api_url {
-        Some(url) => {
-            tracing::info!("Using custom API URL: {}", url);
-            MonoHub::with_url(url)
+    // Build multi-threaded tokio runtime
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
+    // Initialize hub + server on the runtime, then serve in background
+    let is_stdio = args.stdio;
+    rt.spawn(async move {
+        if let Err(e) = run_server(args).await {
+            tracing::error!("server error: {e}");
+            std::process::exit(1);
         }
-        None => {
-            tracing::info!("Using default API: https://api.monochrome.tf");
-            MonoHub::new()
-        }
+    });
+
+    // Main thread: run macOS event loop so media keys + Now Playing widget work.
+    // On non-macOS, just block until the runtime shuts down.
+    if is_stdio {
+        // stdio mode: no media controls needed, just block
+        rt.block_on(futures::future::pending::<()>());
+    } else {
+        run_main_loop();
+    }
+
+    Ok(())
+}
+
+async fn run_server(args: Args) -> anyhow::Result<()> {
+    // Build the activation (initializes audio playback engine + media controls)
+    let mono_hub = if let Some(url) = args.api_url {
+        tracing::info!("Using custom API URL: {}", url);
+        MonoHub::with_url(url).await
+    } else {
+        tracing::info!("Using default API: https://api.monochrome.tf");
+        MonoHub::new().await
     };
 
     // Wrap in a DynamicHub named "monochrome"; the activation inside is "mono"
@@ -112,22 +135,40 @@ async fn main() -> anyhow::Result<()> {
             args.port
         );
         tracing::info!(
-            "  synapse -P {} monochrome mono album --id 67890",
+            "  synapse -P {} monochrome mono play --id 55391801",
             args.port
         );
         tracing::info!(
-            "  synapse -P {} monochrome mono lyrics --id 12345",
+            "  synapse -P {} monochrome mono pause",
             args.port
         );
         tracing::info!(
-            "  synapse -P {} monochrome mono recommendations --id 12345",
-            args.port
-        );
-        tracing::info!(
-            "  synapse -P {} monochrome mono cover --id 12345 --size 1280",
+            "  synapse -P {} monochrome mono now_playing",
             args.port
         );
     }
 
     builder.build().await?.serve().await
+}
+
+/// Run the platform event loop on the main thread.
+/// On macOS this is required for media key handling (MPRemoteCommandCenter).
+#[cfg(target_os = "macos")]
+fn run_main_loop() {
+    // CFRunLoopRun blocks forever, processing system events including
+    // media key dispatches from MPRemoteCommandCenter (via souvlaki).
+    extern "C" {
+        fn CFRunLoopRun();
+    }
+    unsafe {
+        CFRunLoopRun();
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_main_loop() {
+    // On non-macOS, just park the main thread
+    loop {
+        std::thread::park();
+    }
 }
