@@ -7,6 +7,8 @@
 pub mod client;
 pub mod hub;
 pub mod player;
+pub mod player_hub;
+pub mod playlist;
 pub mod types;
 
 // Required by plexus-macros generated code
@@ -14,4 +16,5 @@ pub use plexus_core::serde_helpers;
 
 // Re-exports for convenience
 pub use hub::MonoHub;
+pub use player_hub::PlayerHub;
 pub use types::{MonoEvent, SearchKind};

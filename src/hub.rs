@@ -1,44 +1,45 @@
 //! MonoHub — Plexus RPC activation for the Monochrome music API
 //!
-//! Wraps the Monochrome / Hi-Fi Tidal proxy API and exposes track metadata,
-//! album listings, artist info, search, lyrics, recommendations, cover art,
-//! and full playback controls as streaming Plexus RPC methods.
+//! Stateless API proxy: track metadata, album listings, artist info,
+//! search, lyrics, recommendations, cover art, stream URLs, and downloads.
+//! No audio hardware, no persistence.
 
 use async_stream::stream;
 use futures::Stream;
 use std::sync::Arc;
 
 use crate::client::MonoClient;
-use crate::player::Player;
 use crate::types::{MonoEvent, SearchKind};
 
-/// Monochrome music API activation with playback engine.
+/// Monochrome music API activation — stateless API proxy.
 #[derive(Clone)]
 pub struct MonoHub {
     client: Arc<MonoClient>,
-    player: Arc<Player>,
 }
 
 impl MonoHub {
     /// Create a hub targeting the default Monochrome API instance.
     pub async fn new() -> Self {
         let client = Arc::new(MonoClient::default_instance());
-        let player = Player::new(client.clone()).await;
-        Self { client, player }
+        Self { client }
     }
 
     /// Create a hub targeting a specific API base URL (no trailing slash).
     pub async fn with_url(base_url: impl Into<String>) -> Self {
         let client = Arc::new(MonoClient::new(base_url));
-        let player = Player::new(client.clone()).await;
-        Self { client, player }
+        Self { client }
+    }
+
+    /// Get a shared reference to the underlying MonoClient.
+    pub fn client(&self) -> Arc<MonoClient> {
+        self.client.clone()
     }
 }
 
 #[plexus_macros::hub_methods(
-    namespace = "mono",
+    namespace = "monochrome",
     version = "0.2.0",
-    description = "Monochrome music API — track metadata, search, lyrics, recommendations, and playback",
+    description = "Monochrome music API — track metadata, search, lyrics, recommendations, cover art",
     crate_path = "plexus_core"
 )]
 impl MonoHub {
@@ -238,294 +239,6 @@ impl MonoHub {
                     }
                 }
                 Err(e) => yield MonoEvent::Error { message: e },
-            }
-        }
-    }
-
-    /// Play a track immediately (stops current playback)
-    #[plexus_macros::hub_method(
-        description = "Play a track through speakers. Stops any current playback.",
-        params(
-            id = "Tidal track ID",
-            quality = "Quality: LOSSLESS (default), HI_RES_LOSSLESS, HIGH, LOW"
-        )
-    )]
-    pub async fn play(
-        &self,
-        id: u64,
-        quality: Option<String>,
-    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
-        let player = self.player.clone();
-        let quality = quality.unwrap_or_else(|| "LOSSLESS".to_string());
-        stream! {
-            match player.play_track(id, &quality).await {
-                Ok(()) => yield MonoEvent::PlayerAck {
-                    action: "play".to_string(),
-                    message: format!("playing track {id}"),
-                },
-                Err(e) => yield MonoEvent::Error { message: e },
-            }
-        }
-    }
-
-    /// Pause playback
-    #[plexus_macros::hub_method(
-        description = "Pause the current playback"
-    )]
-    pub async fn pause(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
-        let player = self.player.clone();
-        stream! {
-            player.pause().await;
-            yield MonoEvent::PlayerAck {
-                action: "pause".to_string(),
-                message: "playback paused".to_string(),
-            };
-        }
-    }
-
-    /// Resume playback
-    #[plexus_macros::hub_method(
-        description = "Resume paused playback"
-    )]
-    pub async fn resume(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
-        let player = self.player.clone();
-        stream! {
-            player.resume().await;
-            yield MonoEvent::PlayerAck {
-                action: "resume".to_string(),
-                message: "playback resumed".to_string(),
-            };
-        }
-    }
-
-    /// Stop playback
-    #[plexus_macros::hub_method(
-        description = "Stop playback and clear current track"
-    )]
-    pub async fn stop(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
-        let player = self.player.clone();
-        stream! {
-            player.stop().await;
-            yield MonoEvent::PlayerAck {
-                action: "stop".to_string(),
-                message: "playback stopped".to_string(),
-            };
-        }
-    }
-
-    /// Skip to next track in queue
-    #[plexus_macros::hub_method(
-        description = "Skip to the next track in the queue"
-    )]
-    pub async fn next(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
-        let player = self.player.clone();
-        stream! {
-            match player.next().await {
-                Ok(()) => yield MonoEvent::PlayerAck {
-                    action: "next".to_string(),
-                    message: "skipped to next track".to_string(),
-                },
-                Err(e) => yield MonoEvent::Error { message: e },
-            }
-        }
-    }
-
-    /// Go to previous track
-    #[plexus_macros::hub_method(
-        description = "Go back to the previous track"
-    )]
-    pub async fn previous(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
-        let player = self.player.clone();
-        stream! {
-            match player.previous().await {
-                Ok(()) => yield MonoEvent::PlayerAck {
-                    action: "previous".to_string(),
-                    message: "went to previous track".to_string(),
-                },
-                Err(e) => yield MonoEvent::Error { message: e },
-            }
-        }
-    }
-
-    /// Set volume level
-    #[plexus_macros::hub_method(
-        description = "Set playback volume",
-        params(level = "Volume level from 0.0 (mute) to 1.0 (full)")
-    )]
-    pub async fn volume(
-        &self,
-        level: f32,
-    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
-        let player = self.player.clone();
-        stream! {
-            player.set_volume(level).await;
-            yield MonoEvent::PlayerAck {
-                action: "volume".to_string(),
-                message: format!("volume set to {:.0}%", level * 100.0),
-            };
-        }
-    }
-
-    /// Add an entire album to the playback queue
-    #[plexus_macros::hub_method(
-        streaming,
-        description = "Add all tracks from an album to the queue. Auto-starts if nothing is playing.",
-        params(
-            id = "Tidal album ID",
-            quality = "Quality: LOSSLESS (default), HI_RES_LOSSLESS, HIGH, LOW"
-        )
-    )]
-    pub async fn queue_album(
-        &self,
-        id: u64,
-        quality: Option<String>,
-    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
-        let player = self.player.clone();
-        let quality = quality.unwrap_or_else(|| "LOSSLESS".to_string());
-        stream! {
-            match player.queue_album(id, &quality).await {
-                Ok(tracks) => {
-                    let count = tracks.len();
-                    yield MonoEvent::PlayerAck {
-                        action: "queue_album".to_string(),
-                        message: format!("{count} tracks queued"),
-                    };
-                    // Also emit the queue state
-                    let current_index = Some(0usize);
-                    yield MonoEvent::Queue {
-                        tracks,
-                        current_index,
-                    };
-                }
-                Err(e) => yield MonoEvent::Error { message: e },
-            }
-        }
-    }
-
-    /// Add a track to the playback queue
-    #[plexus_macros::hub_method(
-        description = "Add a track to the end of the playback queue. Auto-starts if nothing is playing.",
-        params(
-            id = "Tidal track ID",
-            quality = "Quality: LOSSLESS (default), HI_RES_LOSSLESS, HIGH, LOW"
-        )
-    )]
-    pub async fn queue_add(
-        &self,
-        id: u64,
-        quality: Option<String>,
-    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
-        let player = self.player.clone();
-        let quality = quality.unwrap_or_else(|| "LOSSLESS".to_string());
-        stream! {
-            match player.queue_add(id, &quality).await {
-                Ok(()) => yield MonoEvent::PlayerAck {
-                    action: "queue_add".to_string(),
-                    message: format!("track {id} added to queue"),
-                },
-                Err(e) => yield MonoEvent::Error { message: e },
-            }
-        }
-    }
-
-    /// Clear the playback queue
-    #[plexus_macros::hub_method(
-        description = "Clear all tracks from the queue (does not stop current track)"
-    )]
-    pub async fn queue_clear(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
-        let player = self.player.clone();
-        stream! {
-            player.queue_clear().await;
-            yield MonoEvent::PlayerAck {
-                action: "queue_clear".to_string(),
-                message: "queue cleared".to_string(),
-            };
-        }
-    }
-
-    /// List queue contents
-    #[plexus_macros::hub_method(
-        description = "Get the current queue contents including the now-playing track"
-    )]
-    pub async fn queue_get(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
-        let player = self.player.clone();
-        stream! {
-            let (current, upcoming) = player.queue_get().await;
-            let current_index = if current.is_some() { Some(0usize) } else { None };
-            let mut tracks = Vec::new();
-            if let Some(c) = current {
-                tracks.push(c);
-            }
-            tracks.extend(upcoming);
-            yield MonoEvent::Queue {
-                tracks,
-                current_index,
-            };
-        }
-    }
-
-    /// Reorder tracks in the queue
-    #[plexus_macros::hub_method(
-        description = "Move a track within the queue",
-        params(
-            from = "Source index in the queue (0-based)",
-            to = "Destination index in the queue (0-based)"
-        )
-    )]
-    pub async fn queue_reorder(
-        &self,
-        from: u32,
-        to: u32,
-    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
-        let player = self.player.clone();
-        stream! {
-            match player.queue_reorder(from as usize, to as usize).await {
-                Ok(()) => yield MonoEvent::PlayerAck {
-                    action: "queue_reorder".to_string(),
-                    message: format!("moved track from position {from} to {to}"),
-                },
-                Err(e) => yield MonoEvent::Error { message: e },
-            }
-        }
-    }
-
-    /// Stream now-playing updates (~1s while playing)
-    #[plexus_macros::hub_method(
-        streaming,
-        description = "Stream real-time playback position and status updates (~1s interval while playing)"
-    )]
-    pub async fn now_playing(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
-        let mut rx = self.player.subscribe_now_playing();
-        stream! {
-            // Emit current state immediately
-            {
-                let np = rx.borrow().clone();
-                yield MonoEvent::NowPlaying {
-                    track_id: np.track_id,
-                    title: np.title,
-                    artist: np.artist,
-                    album: np.album,
-                    status: np.status,
-                    position_secs: np.position_secs,
-                    duration_secs: np.duration_secs,
-                    volume: np.volume,
-                    queue_length: np.queue_length,
-                };
-            }
-            // Then stream updates
-            while rx.changed().await.is_ok() {
-                let np = rx.borrow().clone();
-                yield MonoEvent::NowPlaying {
-                    track_id: np.track_id,
-                    title: np.title,
-                    artist: np.artist,
-                    album: np.album,
-                    status: np.status,
-                    position_secs: np.position_secs,
-                    duration_secs: np.duration_secs,
-                    volume: np.volume,
-                    queue_length: np.queue_length,
-                };
             }
         }
     }

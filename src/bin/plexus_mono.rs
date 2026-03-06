@@ -1,7 +1,7 @@
 use anyhow::anyhow;
 use clap::Parser;
 use plexus_core::plexus::DynamicHub;
-use plexus_mono::MonoHub;
+use plexus_mono::{MonoHub, PlayerHub};
 use plexus_transport::TransportServer;
 use std::sync::Arc;
 
@@ -79,8 +79,8 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn run_server(args: Args) -> anyhow::Result<()> {
-    // Build the activation (initializes audio playback engine + media controls)
-    let mono_hub = if let Some(url) = args.api_url {
+    // Build the API activation (stateless — no audio hardware)
+    let mono_hub = if let Some(ref url) = args.api_url {
         tracing::info!("Using custom API URL: {}", url);
         MonoHub::with_url(url).await
     } else {
@@ -88,13 +88,20 @@ async fn run_server(args: Args) -> anyhow::Result<()> {
         MonoHub::new().await
     };
 
-    // Wrap in a DynamicHub named "monochrome"; the activation inside is "mono"
-    let hub = Arc::new(DynamicHub::new("monochrome").register(mono_hub));
+    // Build the player activation (stateful — audio engine + queue + playlists)
+    let player_hub = PlayerHub::new(mono_hub.client()).await;
+
+    // Wrap in a DynamicHub named "monochrome" with two sibling activations
+    let hub = Arc::new(
+        DynamicHub::new("monochrome")
+            .register(mono_hub)           // leaf — no ChildRouter needed
+            .register_hub(player_hub),    // hub — has playlist child
+    );
 
     tracing::info!("plexus-mono initialized");
-    tracing::info!("  Hub:        monochrome");
-    tracing::info!("  Activation: mono");
-    tracing::info!("  Version:    {}", env!("CARGO_PKG_VERSION"));
+    tracing::info!("  Hub:         monochrome");
+    tracing::info!("  Activations: monochrome (API), player (playback)");
+    tracing::info!("  Version:     {}", env!("CARGO_PKG_VERSION"));
 
     // Configure transport
     let rpc_converter = |arc: Arc<DynamicHub>| {
@@ -127,23 +134,23 @@ async fn run_server(args: Args) -> anyhow::Result<()> {
         tracing::info!("");
         tracing::info!("Usage examples:");
         tracing::info!(
-            "  synapse -P {} monochrome mono track --id 12345",
+            "  synapse -P {} monochrome monochrome search --query 'radiohead'",
             args.port
         );
         tracing::info!(
-            "  synapse -P {} monochrome mono search --query 'radiohead' --kind tracks",
+            "  synapse -P {} monochrome monochrome track --id 12345",
             args.port
         );
         tracing::info!(
-            "  synapse -P {} monochrome mono play --id 55391801",
+            "  synapse -P {} monochrome player play --id 55391801",
             args.port
         );
         tracing::info!(
-            "  synapse -P {} monochrome mono pause",
+            "  synapse -P {} monochrome player now_playing",
             args.port
         );
         tracing::info!(
-            "  synapse -P {} monochrome mono now_playing",
+            "  synapse -P {} monochrome player playlist list",
             args.port
         );
     }

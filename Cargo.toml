@@ -46,6 +46,9 @@ stream-download = { version = "0.9", features = ["reqwest"] }
 # OS media controls (play/pause keys, Now Playing widget)
 souvlaki = "0.8"
 
+# Home directory resolution
+dirs = "6"
+
 # Logging
 tracing = "0.1"
 

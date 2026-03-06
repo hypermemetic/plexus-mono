@@ -1,0 +1,6 @@
+org = "hypermemetic"
+forges = [
+    "codeberg",
+    "github",
+]
+visibility = "public"

@@ -4,13 +4,55 @@
 //! The Sink is Send+Sync and shared via Arc for control from async code.
 
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::{watch, Mutex};
 
 use crate::client::MonoClient;
 use crate::types::{MonoEvent, PlayStatus, QueuedTrack};
+
+/// Persisted player state — saved to disk so playback can resume across restarts
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayerState {
+    pub current_track: Option<QueuedTrack>,
+    pub position_secs: f32,
+    pub queue: Vec<QueuedTrack>,
+    pub history: Vec<QueuedTrack>,
+    pub volume: f32,
+    #[serde(default = "default_preamp")]
+    pub preamp: f32,
+}
+
+fn default_preamp() -> f32 {
+    1.0
+}
+
+impl PlayerState {
+    fn state_path() -> PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".plexus/monochrome/player/state.json")
+    }
+
+    pub fn load() -> Option<Self> {
+        let path = Self::state_path();
+        let data = std::fs::read_to_string(&path).ok()?;
+        serde_json::from_str(&data).ok()
+    }
+
+    pub fn save(&self) {
+        let path = Self::state_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(self) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
+}
 
 /// Helper trait to erase the concrete StreamDownload type behind Box.
 /// Rust doesn't allow `dyn Read + Seek + Send` (multiple non-auto traits),
@@ -29,7 +71,9 @@ pub struct NowPlaying {
     pub position_secs: f32,
     pub duration_secs: f32,
     pub volume: f32,
+    pub preamp: f32,
     pub queue_length: usize,
+    pub url: Option<String>,
 }
 
 impl Default for NowPlaying {
@@ -43,7 +87,9 @@ impl Default for NowPlaying {
             position_secs: 0.0,
             duration_secs: 0.0,
             volume: 1.0,
+            preamp: 1.0,
             queue_length: 0,
+            url: None,
         }
     }
 }
@@ -53,6 +99,7 @@ struct PlayerInner {
     current_track: Option<QueuedTrack>,
     status: PlayStatus,
     volume: f32,
+    preamp: f32,
     history: Vec<QueuedTrack>,
     /// Pre-buffered audio readers keyed by track ID.
     /// Each entry is a StreamDownload that's already connected and downloading.
@@ -99,6 +146,7 @@ impl Player {
                 current_track: None,
                 status: PlayStatus::Idle,
                 volume: 1.0,
+                preamp: 1.0,
                 history: Vec::new(),
                 prefetched: HashMap::new(),
             }),
@@ -150,11 +198,13 @@ impl Player {
                             drop(inner);
                             this.broadcast_now_playing().await;
                         }
+                        this.save_state().await;
                     } else {
                         inner.status = PlayStatus::Idle;
                         inner.current_track = None;
                         drop(inner);
                         this.broadcast_now_playing().await;
+                        this.save_state().await;
                     }
                 }
             }
@@ -184,6 +234,9 @@ impl Player {
 
         // OS media controls (play/pause keys, Now Playing widget)
         player.setup_media_controls();
+
+        // Restore persisted state (queue, history, volume) from previous session
+        player.restore_state().await;
 
         player
     }
@@ -256,6 +309,16 @@ impl Player {
 
                 tracing::info!("media controls active (Now Playing + media keys)");
 
+                // Set initial state immediately to claim media keys from macOS
+                let _ = controls.set_metadata(MediaMetadata {
+                    title: Some("Plexus Mono"),
+                    artist: None,
+                    album: None,
+                    duration: None,
+                    cover_url: None,
+                });
+                let _ = controls.set_playback(MediaPlayback::Paused { progress: None });
+
                 // Poll watch channel and update OS metadata
                 loop {
                     std::thread::sleep(Duration::from_millis(500));
@@ -323,7 +386,9 @@ impl Player {
                 .map(|t| t.duration_secs as f32)
                 .unwrap_or(0.0),
             volume: inner.volume,
+            preamp: inner.preamp,
             queue_length: inner.queue.len(),
+            url: inner.current_track.as_ref().map(|t| format!("https://monochrome.tf/track/t/{}", t.id)),
         };
         let _ = self.now_playing_tx.send(np);
     }
@@ -435,6 +500,7 @@ impl Player {
         inner.prefetched.clear(); // Drop all pre-buffered temp files
         drop(inner);
         self.broadcast_now_playing().await;
+        self.save_state().await;
     }
 
     /// Skip to next track in queue
@@ -459,8 +525,19 @@ impl Player {
         }
     }
 
-    /// Go to previous track (from history)
+    /// Go to previous track (from history), or restart current if >5s in
     pub async fn previous(&self) -> Result<(), String> {
+        // If we're more than 5 seconds into the current track, restart it
+        if self.sink.get_pos().as_secs_f32() > 5.0 {
+            let track = {
+                let inner = self.inner.lock().await;
+                inner.current_track.clone()
+            };
+            if let Some(track) = track {
+                return self.start_playback(track).await;
+            }
+        }
+
         self.sink.stop();
         let prev = {
             let mut inner = self.inner.lock().await;
@@ -478,14 +555,31 @@ impl Player {
         }
     }
 
+    /// Apply combined volume (preamp × volume) to the sink
+    fn apply_volume(&self, inner: &PlayerInner) {
+        self.sink.set_volume(inner.preamp * inner.volume);
+    }
+
     /// Set volume (0.0–1.0)
     pub async fn set_volume(&self, level: f32) {
         let level = level.clamp(0.0, 1.0);
-        self.sink.set_volume(level);
         let mut inner = self.inner.lock().await;
         inner.volume = level;
+        self.apply_volume(&inner);
         drop(inner);
         self.broadcast_now_playing().await;
+        self.save_state().await;
+    }
+
+    /// Set pre-amp gain (0.0–4.0, where >1.0 boosts)
+    pub async fn set_preamp(&self, level: f32) {
+        let level = level.clamp(0.0, 4.0);
+        let mut inner = self.inner.lock().await;
+        inner.preamp = level;
+        self.apply_volume(&inner);
+        drop(inner);
+        self.broadcast_now_playing().await;
+        self.save_state().await;
     }
 
     /// Add a track to the end of the queue. Auto-starts if idle.
@@ -505,12 +599,14 @@ impl Player {
             }
         };
 
-        if should_start {
+        let result = if should_start {
             self.start_playback(queued).await
         } else {
             self.broadcast_now_playing().await;
             Ok(())
-        }
+        };
+        self.save_state().await;
+        result
     }
 
     /// Add all tracks from an album to the queue. Auto-starts if idle.
@@ -571,6 +667,50 @@ impl Player {
         }
 
         Ok(queued_tracks)
+    }
+
+    /// Add multiple tracks to the queue at once. Auto-starts if idle.
+    pub async fn queue_batch(&self, ids: &[u64], quality: &str) -> Result<Vec<QueuedTrack>, String> {
+        if ids.is_empty() {
+            return Err("no track IDs provided".into());
+        }
+
+        // Resolve all track metadata in parallel
+        let futs: Vec<_> = ids.iter().map(|&id| {
+            let client = self.client.clone();
+            let q = quality.to_string();
+            async move {
+                let info = client.track_info(id).await.ok();
+                make_queued_track(id, &q, info)
+            }
+        }).collect();
+        let tracks: Vec<QueuedTrack> = futures::future::join_all(futs).await;
+
+        let should_start = {
+            let mut inner = self.inner.lock().await;
+            let idle = matches!(inner.status, PlayStatus::Idle | PlayStatus::Stopped);
+            if idle {
+                // Queue all but the first; we'll start the first directly
+                for t in tracks.iter().skip(1) {
+                    inner.queue.push_back(t.clone());
+                }
+                true
+            } else {
+                for t in &tracks {
+                    inner.queue.push_back(t.clone());
+                }
+                false
+            }
+        };
+
+        if should_start {
+            self.start_playback(tracks[0].clone()).await?;
+        } else {
+            self.broadcast_now_playing().await;
+        }
+
+        self.save_state().await;
+        Ok(tracks)
     }
 
     /// Clear the queue (does not stop current track)
@@ -661,6 +801,68 @@ impl Player {
     /// Subscribe to now-playing updates
     pub fn subscribe_now_playing(&self) -> watch::Receiver<NowPlaying> {
         self.now_playing_rx.clone()
+    }
+
+    /// Snapshot current state for persistence
+    pub async fn get_state(&self) -> PlayerState {
+        let inner = self.inner.lock().await;
+        PlayerState {
+            current_track: inner.current_track.clone(),
+            position_secs: self.sink.get_pos().as_secs_f32(),
+            queue: inner.queue.iter().cloned().collect(),
+            history: inner.history.clone(),
+            volume: inner.volume,
+            preamp: inner.preamp,
+        }
+    }
+
+    /// Save current state to disk
+    pub async fn save_state(&self) {
+        let state = self.get_state().await;
+        state.save();
+    }
+
+    /// Restore state from disk — resumes playback at the saved position
+    pub async fn restore_state(&self) {
+        if let Some(state) = PlayerState::load() {
+            let resume_track = state.current_track.clone();
+            let resume_pos = state.position_secs;
+
+            {
+                let mut inner = self.inner.lock().await;
+                inner.queue = state.queue.into_iter().collect();
+                inner.history = state.history;
+                inner.volume = state.volume;
+                inner.preamp = state.preamp;
+                self.apply_volume(&inner);
+            }
+
+            // Resume the track that was playing, seeking to saved position
+            if let Some(track) = resume_track {
+                tracing::info!(
+                    "resuming '{}' at {:.0}s",
+                    track.title,
+                    resume_pos
+                );
+                match self.start_playback(track).await {
+                    Ok(()) => {
+                        // Start paused so it doesn't blast on startup
+                        self.sink.pause();
+                        let mut inner = self.inner.lock().await;
+                        inner.status = PlayStatus::Paused;
+                        drop(inner);
+                        self.broadcast_now_playing().await;
+                    }
+                    Err(e) => {
+                        tracing::error!("failed to resume track: {e}");
+                    }
+                }
+            } else {
+                self.broadcast_now_playing().await;
+            }
+
+            tracing::info!("restored player state from disk");
+        }
     }
 }
 

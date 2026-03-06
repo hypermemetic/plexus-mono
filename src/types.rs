@@ -221,8 +221,12 @@ pub enum MonoEvent {
         duration_secs: f32,
         /// Volume level 0.0–1.0
         volume: f32,
+        /// Pre-amp gain 0.0–4.0 (>1.0 boosts)
+        preamp: f32,
         /// Number of tracks in queue
         queue_length: usize,
+        /// Monochrome web URL for the current track
+        url: Option<String>,
     },
 
     /// Queue contents snapshot
@@ -231,6 +235,18 @@ pub enum MonoEvent {
         tracks: Vec<QueuedTrack>,
         /// Index of the currently playing track (if any)
         current_index: Option<usize>,
+    },
+
+    /// Playlist summary info (from playlist list)
+    PlaylistInfo {
+        /// Playlist name
+        name: String,
+        /// Number of tracks in the playlist
+        track_count: usize,
+        /// ISO 8601 creation timestamp
+        created_at: String,
+        /// ISO 8601 last-updated timestamp
+        updated_at: String,
     },
 
     /// Acknowledgement of a player action
