@@ -371,6 +371,30 @@ impl PlayerHub {
         }
     }
 
+    /// Get current playback status (single snapshot, returns immediately)
+    #[plexus_macros::hub_method(
+        description = "Get current playback status — track, position, volume, queue length"
+    )]
+    pub async fn status(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let rx = self.player.subscribe_now_playing();
+        let np = rx.borrow().clone();
+        stream! {
+            yield MonoEvent::NowPlaying {
+                track_id: np.track_id,
+                title: np.title,
+                artist: np.artist,
+                album: np.album,
+                status: np.status,
+                position_secs: np.position_secs,
+                duration_secs: np.duration_secs,
+                volume: np.volume,
+                preamp: np.preamp,
+                queue_length: np.queue_length,
+                url: np.url,
+            };
+        }
+    }
+
     /// Stream now-playing updates (~1s while playing)
     #[plexus_macros::hub_method(
         streaming,

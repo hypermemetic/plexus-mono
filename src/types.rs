@@ -241,6 +241,8 @@ pub enum MonoEvent {
     PlaylistInfo {
         /// Playlist name
         name: String,
+        /// Playlist description
+        description: String,
         /// Number of tracks in the playlist
         track_count: usize,
         /// ISO 8601 creation timestamp

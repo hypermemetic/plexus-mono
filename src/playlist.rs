@@ -21,6 +21,8 @@ use crate::types::{MonoEvent, QueuedTrack};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaylistData {
     pub name: String,
+    #[serde(default)]
+    pub description: String,
     pub tracks: Vec<QueuedTrack>,
     pub created_at: String,
     pub updated_at: String,
@@ -90,6 +92,7 @@ impl PlaylistHub {
         description = "Create a new playlist. Pass track IDs to pre-populate, or omit for empty.",
         params(
             name = "Playlist name",
+            description = "Optional description of the playlist",
             ids = "Optional list of Tidal track IDs to populate the playlist with",
             quality = "Quality tier for track metadata (default LOSSLESS)"
         )
@@ -97,6 +100,7 @@ impl PlaylistHub {
     pub async fn create(
         &self,
         name: String,
+        description: Option<String>,
         ids: Option<Vec<u64>>,
         quality: Option<String>,
     ) -> impl Stream<Item = MonoEvent> + Send + 'static {
@@ -130,8 +134,10 @@ impl PlaylistHub {
                 vec![]
             };
             let count = tracks.len();
+            let description = description.unwrap_or_default();
             let data = PlaylistData {
                 name: name.clone(),
+                description,
                 tracks,
                 created_at: Self::now_iso(),
                 updated_at: Self::now_iso(),
@@ -181,6 +187,7 @@ impl PlaylistHub {
                         found = true;
                         yield MonoEvent::PlaylistInfo {
                             name: data.name,
+                            description: data.description,
                             track_count: data.tracks.len(),
                             created_at: data.created_at,
                             updated_at: data.updated_at,
@@ -197,9 +204,10 @@ impl PlaylistHub {
         }
     }
 
-    /// Show tracks in a playlist
+    /// Get full playlist info (metadata + tracks) — suitable for UI rendering
     #[plexus_macros::hub_method(
-        description = "Show all tracks in a named playlist",
+        streaming,
+        description = "Get full playlist details: name, description, track count, timestamps, then all tracks",
         params(name = "Playlist name")
     )]
     pub async fn show(
@@ -209,10 +217,19 @@ impl PlaylistHub {
         let hub = self.clone();
         stream! {
             match hub.load(&name) {
-                Ok(data) => yield MonoEvent::Queue {
-                    tracks: data.tracks,
-                    current_index: None,
-                },
+                Ok(data) => {
+                    yield MonoEvent::PlaylistInfo {
+                        name: data.name,
+                        description: data.description,
+                        track_count: data.tracks.len(),
+                        created_at: data.created_at,
+                        updated_at: data.updated_at,
+                    };
+                    yield MonoEvent::Queue {
+                        tracks: data.tracks,
+                        current_index: None,
+                    };
+                }
                 Err(e) => yield MonoEvent::Error { message: e },
             }
         }
@@ -371,6 +388,79 @@ impl PlaylistHub {
         }
     }
 
+    /// Set or update a playlist's description
+    #[plexus_macros::hub_method(
+        description = "Set or update the description of a playlist",
+        params(
+            name = "Playlist name",
+            description = "New description text"
+        )
+    )]
+    pub async fn describe(
+        &self,
+        name: String,
+        description: String,
+    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let hub = self.clone();
+        stream! {
+            let mut data = match hub.load(&name) {
+                Ok(d) => d,
+                Err(e) => { yield MonoEvent::Error { message: e }; return; }
+            };
+            data.description = description;
+            data.updated_at = Self::now_iso();
+            match hub.write_playlist(&data) {
+                Ok(()) => yield MonoEvent::PlayerAck {
+                    action: "playlist_describe".into(),
+                    message: format!("updated description for playlist '{name}'"),
+                },
+                Err(e) => yield MonoEvent::Error { message: e },
+            }
+        }
+    }
+
+    /// Reorder a track within a playlist
+    #[plexus_macros::hub_method(
+        description = "Move a track within a playlist from one position to another",
+        params(
+            name = "Playlist name",
+            from = "Source index (0-based)",
+            to = "Destination index (0-based)"
+        )
+    )]
+    pub async fn reorder(
+        &self,
+        name: String,
+        from: u32,
+        to: u32,
+    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let hub = self.clone();
+        stream! {
+            let mut data = match hub.load(&name) {
+                Ok(d) => d,
+                Err(e) => { yield MonoEvent::Error { message: e }; return; }
+            };
+            let (f, t) = (from as usize, to as usize);
+            if f >= data.tracks.len() || t >= data.tracks.len() {
+                yield MonoEvent::Error {
+                    message: format!("index out of bounds (playlist has {} tracks)", data.tracks.len()),
+                };
+                return;
+            }
+            let track = data.tracks.remove(f);
+            let title = track.title.clone();
+            data.tracks.insert(t, track);
+            data.updated_at = Self::now_iso();
+            match hub.write_playlist(&data) {
+                Ok(()) => yield MonoEvent::PlayerAck {
+                    action: "playlist_reorder".into(),
+                    message: format!("moved '{title}' from position {from} to {to}"),
+                },
+                Err(e) => yield MonoEvent::Error { message: e },
+            }
+        }
+    }
+
     /// Load a playlist into the queue and start playing
     #[plexus_macros::hub_method(
         description = "Load playlist tracks into the playback queue and start playing",
@@ -392,7 +482,8 @@ impl PlaylistHub {
                 };
                 return;
             }
-            // Clear current queue and load playlist tracks
+            // Stop current playback and clear queue before loading playlist
+            hub.player.stop().await;
             hub.player.queue_clear().await;
             for track in &data.tracks {
                 match hub.player.queue_add(track.id, &track.quality).await {
@@ -437,6 +528,7 @@ impl PlaylistHub {
             let now = Self::now_iso();
             let data = PlaylistData {
                 name: name.clone(),
+                description: String::new(),
                 tracks,
                 created_at: now.clone(),
                 updated_at: now,

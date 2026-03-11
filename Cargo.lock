@@ -1800,8 +1800,6 @@ checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 [[package]]
 name = "plexus-core"
 version = "0.3.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10f64524c4c97d0623b681b00f55ca065c2a8a2e3dfc87066ec4eac716203a8b"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1837,8 +1835,6 @@ dependencies = [
 [[package]]
 name = "plexus-macros"
 version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1bd45f3e286ab4156b0b5e5cac5d3a7f55287ff2dc1c44e5676b7c4e671beb3"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1878,8 +1874,6 @@ dependencies = [
 [[package]]
 name = "plexus-transport"
 version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da1f49cd8cc357c6b4eb07fa817e4fd3e7e5f0f44d921804dfa6e636a39d9c4e"
 dependencies = [
  "anyhow",
  "async-stream",
