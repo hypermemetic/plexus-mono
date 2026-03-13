@@ -1,7 +1,7 @@
 import { PlexusRpcClient } from '../generated/transport';
 import { createPlayerClient } from '../generated/player/client';
 import { createMonoClient } from '../generated/mono/client';
-import type { MonoEventNowPlaying, MonoEventCover } from '../generated/mono/types';
+import type { MonoEventNowPlaying, MonoEventCover } from '../generated/player/types';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 
 // --- Show/hide animations + click-away dismiss ---
@@ -81,6 +81,7 @@ initNotifications();
 const rpc = new PlexusRpcClient({
   backend: 'monochrome',
   url: 'ws://127.0.0.1:4448',
+  debug: false,
 });
 
 const player = createPlayerClient(rpc);

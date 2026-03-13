@@ -259,6 +259,42 @@ pub enum MonoEvent {
         message: String,
     },
 
+    /// Per-track listening statistics
+    TrackStats {
+        /// Tidal track ID
+        id: u64,
+        /// Track title
+        title: String,
+        /// Primary artist name
+        artist: String,
+        /// Album title
+        album: String,
+        /// Total times playback started
+        play_count: u32,
+        /// Times the track finished naturally
+        complete_count: u32,
+        /// Times the track was skipped
+        skip_count: u32,
+        /// Cumulative seconds spent listening
+        total_listen_secs: f32,
+        /// ISO 8601 timestamp of first play
+        first_played: String,
+        /// ISO 8601 timestamp of most recent play
+        last_played: String,
+    },
+
+    /// Individual listen log entry
+    ListenEvent {
+        /// Tidal track ID
+        track_id: u64,
+        /// ISO 8601 timestamp when playback started
+        started_at: String,
+        /// How long the user actually listened (seconds)
+        duration_listened: f32,
+        /// How the listen session ended
+        outcome: ListenOutcome,
+    },
+
     /// Error from any method
     Error {
         /// Human-readable error description
@@ -323,4 +359,54 @@ impl Default for SearchKind {
     fn default() -> Self {
         SearchKind::Tracks
     }
+}
+
+/// How a listen session ended
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ListenOutcome {
+    /// Track finished playing naturally
+    Complete,
+    /// User skipped (next/previous/play-other)
+    Skip,
+    /// User stopped playback
+    Stop,
+}
+
+/// Aggregate per-track listening statistics
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TrackStats {
+    /// Tidal track ID
+    pub id: u64,
+    /// Track title
+    pub title: String,
+    /// Primary artist name
+    pub artist: String,
+    /// Album title
+    pub album: String,
+    /// Total times playback started
+    pub play_count: u32,
+    /// Times the track finished naturally
+    pub complete_count: u32,
+    /// Times the track was skipped
+    pub skip_count: u32,
+    /// Cumulative seconds spent listening
+    pub total_listen_secs: f32,
+    /// ISO 8601 timestamp of first play
+    pub first_played: String,
+    /// ISO 8601 timestamp of most recent play
+    pub last_played: String,
+}
+
+/// Individual listen log entry
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ListenEvent {
+    /// Tidal track ID
+    pub track_id: u64,
+    /// ISO 8601 timestamp when playback started
+    pub started_at: String,
+    /// How long the user actually listened (seconds)
+    pub duration_listened: f32,
+    /// How the listen session ended
+    pub outcome: ListenOutcome,
 }

@@ -137,6 +137,41 @@ fn install_click_outside_monitor(window: tauri::WebviewWindow) {
 #[cfg(not(target_os = "macos"))]
 fn install_click_outside_monitor(_window: tauri::WebviewWindow) {}
 
+/// Hide the panel when the active macOS Space changes (e.g. swipe, Mission Control).
+#[cfg(target_os = "macos")]
+fn install_space_change_monitor(window: tauri::WebviewWindow) {
+    use cocoa::base::id;
+    use cocoa::foundation::NSString;
+    use std::sync::Arc;
+
+    let win = Arc::new(window);
+
+    let block = block::ConcreteBlock::new(move |_notif: id| {
+        let _ = win.emit("mono-tray://hide", ());
+    });
+    let block = block.copy();
+
+    unsafe {
+        let workspace: id = msg_send![
+            objc::runtime::Class::get("NSWorkspace").unwrap(),
+            sharedWorkspace
+        ];
+        let center: id = msg_send![workspace, notificationCenter];
+        let name: id = cocoa::foundation::NSString::alloc(cocoa::base::nil)
+            .init_str("NSWorkspaceActiveSpaceDidChangeNotification");
+        let _: id = msg_send![center,
+            addObserverForName: name
+            object: cocoa::base::nil
+            queue: cocoa::base::nil
+            usingBlock: &*block
+        ];
+        std::mem::forget(block);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_space_change_monitor(_window: tauri::WebviewWindow) {}
+
 fn show_window(app: &tauri::AppHandle, tray_rect: Option<tauri::Rect>) {
     if let Some(window) = app.get_webview_window("main") {
         let visible = window.is_visible().unwrap_or(false);
@@ -172,6 +207,7 @@ fn main() {
 
             if let Some(window) = app.get_webview_window("main") {
                 configure_as_panel(&window);
+                install_space_change_monitor(window.clone());
                 install_click_outside_monitor(window);
             }
 

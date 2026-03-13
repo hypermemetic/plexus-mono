@@ -5,8 +5,12 @@
 //! No audio hardware, no persistence.
 
 use async_stream::stream;
+use async_trait::async_trait;
 use futures::Stream;
 use std::sync::Arc;
+
+use plexus_core::plexus::{ChildRouter, PlexusError, PlexusStream};
+use plexus_core::Activation;
 
 use crate::client::MonoClient;
 use crate::types::{MonoEvent, SearchKind};
@@ -34,11 +38,17 @@ impl MonoHub {
     pub fn client(&self) -> Arc<MonoClient> {
         self.client.clone()
     }
+
+    /// No children — leaf hub for schema compatibility
+    pub fn plugin_children(&self) -> Vec<plexus_core::plexus::schema::ChildSummary> {
+        vec![]
+    }
 }
 
 #[plexus_macros::hub_methods(
     namespace = "monochrome",
     version = "0.2.0",
+    hub,
     description = "Monochrome music API — track metadata, search, lyrics, recommendations, cover art",
     crate_path = "plexus_core"
 )]
@@ -268,5 +278,24 @@ impl MonoHub {
                 Err(e) => yield MonoEvent::Error { message: e },
             }
         }
+    }
+}
+
+#[async_trait]
+impl ChildRouter for MonoHub {
+    fn router_namespace(&self) -> &str {
+        "monochrome"
+    }
+
+    async fn router_call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<PlexusStream, PlexusError> {
+        self.call(method, params).await
+    }
+
+    async fn get_child(&self, _name: &str) -> Option<Box<dyn ChildRouter>> {
+        None
     }
 }

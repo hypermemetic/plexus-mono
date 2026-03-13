@@ -8,11 +8,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{watch, Mutex};
 
 use crate::client::MonoClient;
-use crate::types::{MonoEvent, PlayStatus, QueuedTrack};
+use crate::types::{ListenEvent, ListenOutcome, MonoEvent, PlayStatus, QueuedTrack, TrackStats};
 
 /// Persisted player state — saved to disk so playback can resume across restarts
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +54,120 @@ impl PlayerState {
         }
     }
 }
+
+/// Persistent store for per-track stats and listen log
+pub struct StatsStore {
+    stats: HashMap<u64, TrackStats>,
+    listen_log: Vec<ListenEvent>,
+}
+
+impl StatsStore {
+    fn stats_path() -> PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".plexus/monochrome/player/stats.json")
+    }
+
+    fn log_path() -> PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".plexus/monochrome/player/listen_log.json")
+    }
+
+    pub fn load() -> Self {
+        let stats: HashMap<u64, TrackStats> = Self::stats_path()
+            .pipe(|p| std::fs::read_to_string(p).ok())
+            .and_then(|d| serde_json::from_str(&d).ok())
+            .unwrap_or_default();
+
+        let listen_log: Vec<ListenEvent> = Self::log_path()
+            .pipe(|p| std::fs::read_to_string(p).ok())
+            .and_then(|d| serde_json::from_str(&d).ok())
+            .unwrap_or_default();
+
+        Self { stats, listen_log }
+    }
+
+    fn save(&self) {
+        fn save_json(path: PathBuf, json: &str) {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&path, json);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&self.stats) {
+            save_json(Self::stats_path(), &json);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&self.listen_log) {
+            save_json(Self::log_path(), &json);
+        }
+    }
+
+    /// Record that a track started playing. Returns the ISO 8601 timestamp.
+    pub fn record_start(&mut self, track: &QueuedTrack) -> String {
+        let now = Utc::now().to_rfc3339();
+        let entry = self.stats.entry(track.id).or_insert_with(|| TrackStats {
+            id: track.id,
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+            album: track.album.clone(),
+            play_count: 0,
+            complete_count: 0,
+            skip_count: 0,
+            total_listen_secs: 0.0,
+            first_played: now.clone(),
+            last_played: now.clone(),
+        });
+        entry.play_count += 1;
+        entry.last_played = now.clone();
+        // Update metadata in case it changed
+        entry.title = track.title.clone();
+        entry.artist = track.artist.clone();
+        entry.album = track.album.clone();
+        self.save();
+        now
+    }
+
+    /// Record that a track ended (complete, skip, or stop)
+    pub fn record_end(
+        &mut self,
+        track_id: u64,
+        started_at: &str,
+        duration_listened: f32,
+        outcome: ListenOutcome,
+    ) {
+        // Update aggregate stats
+        if let Some(entry) = self.stats.get_mut(&track_id) {
+            entry.total_listen_secs += duration_listened;
+            match &outcome {
+                ListenOutcome::Complete => entry.complete_count += 1,
+                ListenOutcome::Skip => entry.skip_count += 1,
+                ListenOutcome::Stop => {} // stop doesn't increment skip or complete
+            }
+        }
+
+        // Append to listen log
+        self.listen_log.push(ListenEvent {
+            track_id,
+            started_at: started_at.to_string(),
+            duration_listened,
+            outcome,
+        });
+
+        self.save();
+    }
+}
+
+/// Pipe trait for ergonomic chaining
+trait Pipe: Sized {
+    fn pipe<F, R>(self, f: F) -> R
+    where
+        F: FnOnce(Self) -> R,
+    {
+        f(self)
+    }
+}
+impl<T> Pipe for T {}
 
 /// Helper trait to erase the concrete StreamDownload type behind Box.
 /// Rust doesn't allow `dyn Read + Seek + Send` (multiple non-auto traits),
@@ -105,12 +220,15 @@ struct PlayerInner {
     /// Each entry is a StreamDownload that's already connected and downloading.
     /// Dropped automatically when removed (temp file cleaned up via RAII).
     prefetched: HashMap<u64, Box<dyn ReadSeekSend>>,
+    /// Timestamp when current track started playing (ISO 8601)
+    listen_started_at: Option<String>,
 }
 
 /// Audio playback engine with queue and controls
 pub struct Player {
     sink: Arc<rodio::Sink>,
     inner: Mutex<PlayerInner>,
+    stats: Mutex<StatsStore>,
     now_playing_tx: watch::Sender<NowPlaying>,
     now_playing_rx: watch::Receiver<NowPlaying>,
     client: Arc<MonoClient>,
@@ -149,7 +267,9 @@ impl Player {
                 preamp: 1.0,
                 history: Vec::new(),
                 prefetched: HashMap::new(),
+                listen_started_at: None,
             }),
+            stats: Mutex::new(StatsStore::load()),
             now_playing_tx,
             now_playing_rx,
             client,
@@ -183,7 +303,16 @@ impl Player {
                 }
                 let mut inner = this.inner.lock().await;
                 if matches!(inner.status, PlayStatus::Playing) {
-                    // Track ended naturally
+                    // Track ended naturally — record as complete
+                    let listen_info = inner.current_track.as_ref().map(|t| (t.id, t.duration_secs as f32));
+                    let started_at = inner.listen_started_at.take();
+                    if let (Some((track_id, duration)), Some(started_at)) = (listen_info, started_at) {
+                        drop(inner);
+                        let mut stats = this.stats.lock().await;
+                        stats.record_end(track_id, &started_at, duration, ListenOutcome::Complete);
+                        drop(stats);
+                        inner = this.inner.lock().await;
+                    }
                     if let Some(current) = inner.current_track.take() {
                         inner.history.push(current);
                     }
@@ -393,8 +522,33 @@ impl Player {
         let _ = self.now_playing_tx.send(np);
     }
 
+    /// End the current listen session if one is active.
+    /// Computes duration from listen_started_at to now, records stats.
+    async fn end_current_listen(&self, outcome: ListenOutcome) {
+        let (track_id, started_at, position) = {
+            let mut inner = self.inner.lock().await;
+            let started = inner.listen_started_at.take();
+            match (inner.current_track.as_ref(), started) {
+                (Some(track), Some(started_at)) => {
+                    (track.id, started_at, self.sink.get_pos().as_secs_f32())
+                }
+                _ => return,
+            }
+        };
+        let mut stats = self.stats.lock().await;
+        stats.record_end(track_id, &started_at, position, outcome);
+    }
+
     /// Resolve stream URL, create decoder, and start playback on the sink.
     async fn start_playback(&self, track: QueuedTrack) -> Result<(), String> {
+        // Record start in stats
+        {
+            let mut stats = self.stats.lock().await;
+            let ts = stats.record_start(&track);
+            let mut inner = self.inner.lock().await;
+            inner.listen_started_at = Some(ts);
+        }
+
         {
             let mut inner = self.inner.lock().await;
             inner.current_track = Some(track.clone());
@@ -456,6 +610,9 @@ impl Player {
         let track_info = self.client.track_info(id).await.ok();
         let queued = make_queued_track(id, quality, track_info);
 
+        // End current listen as skip (interrupting for a different track)
+        self.end_current_listen(ListenOutcome::Skip).await;
+
         // Move current to history
         {
             let mut inner = self.inner.lock().await;
@@ -491,6 +648,7 @@ impl Player {
 
     /// Stop playback and clear current track
     pub async fn stop(&self) {
+        self.end_current_listen(ListenOutcome::Stop).await;
         self.sink.stop();
         let mut inner = self.inner.lock().await;
         if let Some(current) = inner.current_track.take() {
@@ -503,8 +661,25 @@ impl Player {
         self.save_state().await;
     }
 
+    /// Seek to a position in the current track (in seconds)
+    pub async fn seek(&self, position_secs: f32) -> Result<(), String> {
+        let has_track = {
+            let inner = self.inner.lock().await;
+            inner.current_track.is_some()
+        };
+        if !has_track {
+            return Err("no track playing".to_string());
+        }
+        self.sink
+            .try_seek(Duration::from_secs_f32(position_secs))
+            .map_err(|e| format!("seek failed: {e}"))?;
+        self.broadcast_now_playing().await;
+        Ok(())
+    }
+
     /// Skip to next track in queue
     pub async fn next(&self) -> Result<(), String> {
+        self.end_current_listen(ListenOutcome::Skip).await;
         self.sink.stop();
         let next = {
             let mut inner = self.inner.lock().await;
@@ -529,6 +704,8 @@ impl Player {
     pub async fn previous(&self) -> Result<(), String> {
         // If we're more than 5 seconds into the current track, restart it
         if self.sink.get_pos().as_secs_f32() > 5.0 {
+            // End current listen as skip (restarting counts as a new play)
+            self.end_current_listen(ListenOutcome::Skip).await;
             let track = {
                 let inner = self.inner.lock().await;
                 inner.current_track.clone()
@@ -538,6 +715,7 @@ impl Player {
             }
         }
 
+        self.end_current_listen(ListenOutcome::Skip).await;
         self.sink.stop();
         let prev = {
             let mut inner = self.inner.lock().await;
@@ -863,6 +1041,44 @@ impl Player {
 
             tracing::info!("restored player state from disk");
         }
+    }
+
+    // ── Stats & Listen History queries ────────────────────────────────
+
+    /// Get stats for a specific track by ID
+    pub async fn get_track_stats(&self, id: u64) -> Option<TrackStats> {
+        let stats = self.stats.lock().await;
+        stats.stats.get(&id).cloned()
+    }
+
+    /// Get top N most-played tracks, sorted by play_count descending
+    pub async fn get_top_tracks(&self, limit: usize) -> Vec<TrackStats> {
+        let stats = self.stats.lock().await;
+        let mut sorted: Vec<TrackStats> = stats.stats.values().cloned().collect();
+        sorted.sort_by(|a, b| b.play_count.cmp(&a.play_count));
+        sorted.truncate(limit);
+        sorted
+    }
+
+    /// Get most recent listen events
+    pub async fn get_recent_listens(&self, limit: usize) -> Vec<ListenEvent> {
+        let stats = self.stats.lock().await;
+        let len = stats.listen_log.len();
+        let start = len.saturating_sub(limit);
+        stats.listen_log[start..].iter().rev().cloned().collect()
+    }
+
+    /// Get full listen log
+    pub async fn get_listen_log(&self) -> Vec<ListenEvent> {
+        let stats = self.stats.lock().await;
+        stats.listen_log.clone()
+    }
+
+    /// Clear the listen log (keeps aggregate stats)
+    pub async fn clear_listen_log(&self) {
+        let mut stats = self.stats.lock().await;
+        stats.listen_log.clear();
+        stats.save();
     }
 }
 

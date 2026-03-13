@@ -94,7 +94,7 @@ async fn run_server(args: Args) -> anyhow::Result<()> {
     // Wrap in a DynamicHub named "monochrome" with two sibling activations
     let hub = Arc::new(
         DynamicHub::new("monochrome")
-            .register(mono_hub)           // leaf — no ChildRouter needed
+            .register_hub(mono_hub)       // hub — supports recursive schema
             .register_hub(player_hub),    // hub — has playlist child
     );
 

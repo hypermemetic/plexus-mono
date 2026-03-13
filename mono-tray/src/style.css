@@ -17,12 +17,17 @@
 
 html, body {
   background: transparent !important;
-  width: 100%;
+}
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar {
+  display: none;
 }
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
   color: var(--text);
+  width: 352px;
   padding: 0 16px 16px 16px;
   overflow: visible;
   user-select: none;
@@ -38,8 +43,7 @@ body {
   gap: 10px;
   background: var(--bg);
   border-radius: var(--radius);
-  filter: drop-shadow(0 4px 24px rgba(0, 0, 0, 0.5));
-  box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.08);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5), 0 0 0 0.5px rgba(255, 255, 255, 0.08);
   opacity: 0;
   transform: translateY(-6px);
 }

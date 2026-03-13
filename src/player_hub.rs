@@ -395,6 +395,27 @@ impl PlayerHub {
         }
     }
 
+    /// Seek to a position in the current track
+    #[plexus_macros::hub_method(
+        description = "Seek to a position in the current track",
+        params(position_secs = "Position in seconds to seek to")
+    )]
+    pub async fn seek(
+        &self,
+        position_secs: f32,
+    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        stream! {
+            match player.seek(position_secs).await {
+                Ok(()) => yield MonoEvent::PlayerAck {
+                    action: "seek".to_string(),
+                    message: format!("seeked to {position_secs:.1}s"),
+                },
+                Err(e) => yield MonoEvent::Error { message: e },
+            }
+        }
+    }
+
     /// Stream now-playing updates (~1s while playing)
     #[plexus_macros::hub_method(
         streaming,
@@ -437,6 +458,128 @@ impl PlayerHub {
                     url: np.url,
                 };
             }
+        }
+    }
+
+    /// Get listening stats for a specific track
+    #[plexus_macros::hub_method(
+        description = "Get per-track listening statistics (play count, skip count, total listen time)",
+        params(id = "Tidal track ID")
+    )]
+    pub async fn stats(
+        &self,
+        id: u64,
+    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        stream! {
+            match player.get_track_stats(id).await {
+                Some(s) => yield MonoEvent::TrackStats {
+                    id: s.id,
+                    title: s.title,
+                    artist: s.artist,
+                    album: s.album,
+                    play_count: s.play_count,
+                    complete_count: s.complete_count,
+                    skip_count: s.skip_count,
+                    total_listen_secs: s.total_listen_secs,
+                    first_played: s.first_played,
+                    last_played: s.last_played,
+                },
+                None => yield MonoEvent::Error {
+                    message: format!("no stats for track {id}"),
+                },
+            }
+        }
+    }
+
+    /// Get top most-played tracks
+    #[plexus_macros::hub_method(
+        streaming,
+        description = "Get top N most-played tracks sorted by play count",
+        params(limit = "Number of tracks to return (default 10)")
+    )]
+    pub async fn stats_top(
+        &self,
+        limit: Option<u32>,
+    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        let limit = limit.unwrap_or(10) as usize;
+        stream! {
+            let tracks = player.get_top_tracks(limit).await;
+            for s in tracks {
+                yield MonoEvent::TrackStats {
+                    id: s.id,
+                    title: s.title,
+                    artist: s.artist,
+                    album: s.album,
+                    play_count: s.play_count,
+                    complete_count: s.complete_count,
+                    skip_count: s.skip_count,
+                    total_listen_secs: s.total_listen_secs,
+                    first_played: s.first_played,
+                    last_played: s.last_played,
+                };
+            }
+        }
+    }
+
+    /// Get most recently played tracks
+    #[plexus_macros::hub_method(
+        streaming,
+        description = "Get the most recent listen events (newest first)",
+        params(limit = "Number of events to return (default 10)")
+    )]
+    pub async fn stats_recent(
+        &self,
+        limit: Option<u32>,
+    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        let limit = limit.unwrap_or(10) as usize;
+        stream! {
+            let events = player.get_recent_listens(limit).await;
+            for e in events {
+                yield MonoEvent::ListenEvent {
+                    track_id: e.track_id,
+                    started_at: e.started_at,
+                    duration_listened: e.duration_listened,
+                    outcome: e.outcome,
+                };
+            }
+        }
+    }
+
+    /// Stream full listen log
+    #[plexus_macros::hub_method(
+        streaming,
+        description = "Stream the full listen history log"
+    )]
+    pub async fn history(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        stream! {
+            let events = player.get_listen_log().await;
+            for e in events {
+                yield MonoEvent::ListenEvent {
+                    track_id: e.track_id,
+                    started_at: e.started_at,
+                    duration_listened: e.duration_listened,
+                    outcome: e.outcome,
+                };
+            }
+        }
+    }
+
+    /// Clear listen history log
+    #[plexus_macros::hub_method(
+        description = "Clear the listen history log (aggregate stats are preserved)"
+    )]
+    pub async fn history_clear(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        stream! {
+            player.clear_listen_log().await;
+            yield MonoEvent::PlayerAck {
+                action: "history_clear".to_string(),
+                message: "listen history cleared".to_string(),
+            };
         }
     }
 }
