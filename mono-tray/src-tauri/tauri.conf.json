@@ -1,0 +1,47 @@
+{
+  "$schema": "https://raw.githubusercontent.com/niceda/schemas/main/tauri/tauri.conf.schema.json",
+  "productName": "Mono Tray",
+  "version": "0.1.0",
+  "identifier": "tf.monochrome.mono-tray",
+  "build": {
+    "frontendDist": "../dist",
+    "beforeDevCommand": "bun run build",
+    "beforeBuildCommand": "bun run build"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Mono Tray",
+        "width": 352,
+        "height": 520,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "visible": false,
+        "skipTaskbar": true,
+        "alwaysOnTop": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' https://resources.tidal.com; connect-src 'self' ws://127.0.0.1:4448; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon.png"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "12.0"
+    }
+  },
+  "plugins": {
+    "shell": {
+      "open": true
+    }
+  }
+}

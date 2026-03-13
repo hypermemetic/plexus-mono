@@ -1,0 +1,199 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+#[macro_use]
+extern crate objc;
+
+use tauri::{
+    tray::{MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Emitter, Manager,
+};
+
+#[cfg(target_os = "macos")]
+fn set_activation_policy() {
+    use cocoa::appkit::{NSApp, NSApplication, NSApplicationActivationPolicy};
+    unsafe {
+        let app = NSApp();
+        app.setActivationPolicy_(
+            NSApplicationActivationPolicy::NSApplicationActivationPolicyAccessory,
+        );
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_activation_policy() {}
+
+/// Convert the Tauri NSWindow into an NSPanel for fullscreen overlay support.
+#[cfg(target_os = "macos")]
+fn configure_as_panel(window: &tauri::WebviewWindow) {
+    use cocoa::appkit::{NSWindow, NSWindowCollectionBehavior};
+    use cocoa::base::id;
+    use cocoa::foundation::NSString;
+    use std::ffi::c_void;
+
+    extern "C" {
+        fn object_setClass(obj: *mut c_void, cls: *const c_void) -> *const c_void;
+    }
+
+    let ns_window: id = window.ns_window().unwrap() as id;
+    unsafe {
+        // Swap class from NSWindow → NSPanel (subclass, layout-compatible)
+        let panel_class =
+            objc::runtime::Class::get("NSPanel").expect("NSPanel class not found");
+        object_setClass(
+            ns_window as *mut c_void,
+            panel_class as *const _ as *const c_void,
+        );
+
+        // NSNonactivatingPanelMask (1 << 7) — panel doesn't activate the app
+        let current_mask: u64 = msg_send![ns_window, styleMask];
+        let new_mask = current_mask | (1u64 << 7);
+        let _: () = msg_send![ns_window, setStyleMask: new_mask];
+
+        // Window level + collection behavior for fullscreen overlay
+        ns_window.setLevel_(25); // NSStatusWindowLevel
+        ns_window.setCollectionBehavior_(
+            NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
+                | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary
+                | NSWindowCollectionBehavior::NSWindowCollectionBehaviorIgnoresCycle
+                | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary,
+        );
+
+        // Panel-specific properties
+        let _: () = msg_send![ns_window, setHidesOnDeactivate: false];
+        let _: () = msg_send![ns_window, setFloatingPanel: true];
+        let _: () = msg_send![ns_window, setWorksWhenModal: true];
+
+        // Transparent window — no native background, no native shadow
+        let _: () = msg_send![ns_window, setOpaque: false];
+        let clear_color: id =
+            msg_send![objc::runtime::Class::get("NSColor").unwrap(), clearColor];
+        let _: () = msg_send![ns_window, setBackgroundColor: clear_color];
+        let _: () = msg_send![ns_window, setHasShadow: false];
+
+        // Force WKWebView to be transparent (re-apply after class swap)
+        // Use setValue:forKey: which is safe on any NSObject
+        let content_view: id = msg_send![ns_window, contentView];
+        let subviews: id = msg_send![content_view, subviews];
+        let count: usize = msg_send![subviews, count];
+        let no: id = msg_send![objc::runtime::Class::get("NSNumber").unwrap(), numberWithBool: false];
+        let key: id = cocoa::foundation::NSString::alloc(cocoa::base::nil)
+            .init_str("drawsBackground");
+        for i in 0..count {
+            let subview: id = msg_send![subviews, objectAtIndex: i];
+            let sel = objc::runtime::Sel::register("setValue:forKey:");
+            let responds: bool = msg_send![subview, respondsToSelector: sel];
+            if responds {
+                let _: () = msg_send![subview, setValue: no forKey: key];
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn configure_as_panel(_window: &tauri::WebviewWindow) {}
+
+/// Install a global mouse-click monitor that hides the window when
+/// the user clicks anywhere outside it.
+#[cfg(target_os = "macos")]
+fn install_click_outside_monitor(window: tauri::WebviewWindow) {
+    use cocoa::base::id;
+    use cocoa::foundation::NSRect;
+    use std::sync::Arc;
+
+    let win = Arc::new(window);
+    let win_clone = win.clone();
+
+    let block = block::ConcreteBlock::new(move |_event: id| {
+        if let Some(ns_win) = win_clone.ns_window().ok().map(|w| w as id) {
+            unsafe {
+                let visible: bool = msg_send![ns_win, isVisible];
+                if visible {
+                    let mouse_loc: cocoa::foundation::NSPoint =
+                        msg_send![objc::runtime::Class::get("NSEvent").unwrap(), mouseLocation];
+                    let frame: NSRect = msg_send![ns_win, frame];
+                    let inside = mouse_loc.x >= frame.origin.x
+                        && mouse_loc.x <= frame.origin.x + frame.size.width
+                        && mouse_loc.y >= frame.origin.y
+                        && mouse_loc.y <= frame.origin.y + frame.size.height;
+                    if !inside {
+                        // Emit hide event so JS can animate out
+                        let _ = win_clone.emit("mono-tray://hide", ());
+                    }
+                }
+            }
+        }
+    });
+    let block = block.copy();
+
+    unsafe {
+        let ns_event_class = objc::runtime::Class::get("NSEvent").unwrap();
+        // NSLeftMouseDownMask | NSRightMouseDownMask
+        let mask: u64 = (1 << 1) | (1 << 3);
+        let _: id = msg_send![ns_event_class, addGlobalMonitorForEventsMatchingMask:mask handler:&*block];
+        std::mem::forget(block);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_click_outside_monitor(_window: tauri::WebviewWindow) {}
+
+fn show_window(app: &tauri::AppHandle, tray_rect: Option<tauri::Rect>) {
+    if let Some(window) = app.get_webview_window("main") {
+        let visible = window.is_visible().unwrap_or(false);
+        if visible {
+            // Request animated hide
+            let _ = app.emit("mono-tray://hide", ());
+        } else {
+            // Position below tray icon with a small gap
+            if let Some(rect) = tray_rect {
+                let scale = window.scale_factor().unwrap_or(2.0);
+                let pos = rect.position.to_logical::<f64>(scale);
+                let size = rect.size.to_logical::<f64>(scale);
+                let x = pos.x - 176.0 + (size.width / 2.0);
+                let y = pos.y + size.height + 4.0;
+                let _ = window.set_position(tauri::Position::Logical(
+                    tauri::LogicalPosition::new(x, y),
+                ));
+            }
+
+            let _ = window.show();
+            let _ = window.set_focus();
+            let _ = app.emit("mono-tray://show", ());
+        }
+    }
+}
+
+fn main() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_notification::init())
+        .setup(|app| {
+            set_activation_policy();
+
+            if let Some(window) = app.get_webview_window("main") {
+                configure_as_panel(&window);
+                install_click_outside_monitor(window);
+            }
+
+            let _tray = TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .icon_as_template(true)
+                .tooltip("Mono Tray")
+                .show_menu_on_left_click(false)
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button_state: MouseButtonState::Up,
+                        rect,
+                        ..
+                    } = event
+                    {
+                        show_window(tray.app_handle(), Some(rect));
+                    }
+                })
+                .build(app)?;
+
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
