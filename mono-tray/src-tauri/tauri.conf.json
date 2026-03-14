@@ -16,7 +16,7 @@
         "label": "main",
         "title": "Mono Tray",
         "width": 352,
-        "height": 520,
+        "height": 556,
         "resizable": false,
         "decorations": false,
         "transparent": true,
