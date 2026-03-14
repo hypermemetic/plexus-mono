@@ -41,14 +41,6 @@ fn register_panel_class() -> &'static objc::runtime::Class {
         YES
     }
 
-    // Forward sendEvent: to super, ensuring mouseMoved events are dispatched
-    extern "C" fn send_event(this: &Object, _sel: Sel, event: id) {
-        unsafe {
-            let superclass = Class::get("NSPanel").unwrap();
-            let _: () = msg_send![super(this, superclass), sendEvent: event];
-        }
-    }
-
     unsafe {
         INIT.call_once(|| {
             let superclass = Class::get("NSPanel").unwrap();
@@ -60,10 +52,6 @@ fn register_panel_class() -> &'static objc::runtime::Class {
             decl.add_method(
                 sel!(canBecomeMainWindow),
                 can_become_main as extern "C" fn(&Object, Sel) -> BOOL,
-            );
-            decl.add_method(
-                sel!(sendEvent:),
-                send_event as extern "C" fn(&Object, Sel, id),
             );
             PANEL_CLASS = Some(decl.register());
         });
@@ -109,7 +97,6 @@ fn configure_as_panel(window: &tauri::WebviewWindow) {
         let _: () = msg_send![ns_window, setHidesOnDeactivate: false];
         let _: () = msg_send![ns_window, setFloatingPanel: true];
         let _: () = msg_send![ns_window, setWorksWhenModal: true];
-        let _: () = msg_send![ns_window, setAcceptsMouseMovedEvents: true];
         let _: () = msg_send![ns_window, setBecomesKeyOnlyIfNeeded: false];
         let _: () = msg_send![ns_window, setIgnoresMouseEvents: false];
 
