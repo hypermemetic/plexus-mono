@@ -1,5 +1,5 @@
 {
-  "schema": "1.0",
+  "schema": "1.1",
   "language": "typescript",
   "backend": "monochrome",
   "url": "ws://127.0.0.1:4448",
@@ -9,6 +9,14 @@
       "generate": ["transport", "rpc", "plugins"],
       "transport": "browser",
       "outputDir": "generated"
+    },
+    "substrate-claudecode": {
+      "backend": "substrate",
+      "url": "ws://127.0.0.1:4444",
+      "plugins": ["claudecode"],
+      "generate": ["transport", "rpc", "plugins"],
+      "transport": "browser",
+      "outputDir": "generated-substrate"
     }
   }
 }

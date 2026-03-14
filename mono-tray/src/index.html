@@ -124,6 +124,12 @@
       <div id="view-browse" class="view-panel">
         <div id="search-container">
           <input type="text" id="search-input" placeholder="Search tracks..." autocomplete="off" spellcheck="false" />
+          <button id="sparkle-btn" class="nav-btn" title="AI Research">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 2L9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61z"/>
+            </svg>
+            <span id="sparkle-badge" class="hidden"></span>
+          </button>
         </div>
         <div id="browse-list"></div>
       </div>
@@ -140,6 +146,31 @@
         <div id="queue-tracks"></div>
       </div>
 
+      <!-- View 5: Research Results -->
+      <div id="view-research" class="view-panel">
+        <div id="research-header">
+          <input type="text" id="research-name" placeholder="Playlist name" autocomplete="off" spellcheck="false" />
+        </div>
+        <div id="research-tracks"></div>
+        <div id="research-actions">
+          <button id="research-create-btn" class="action-btn primary">Create Playlist</button>
+          <button id="research-queue-btn" class="action-btn">Add All to Queue</button>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Playlist picker overlay -->
+    <div id="playlist-picker" class="hidden">
+      <div id="playlist-picker-content">
+        <div id="playlist-picker-title">Add to Playlist</div>
+        <div id="playlist-picker-list"></div>
+        <button id="playlist-picker-new" class="list-row">
+          <div class="list-row-info">
+            <div class="list-row-title">+ New Playlist...</div>
+          </div>
+        </button>
+      </div>
     </div>
   </div>
   <script type="module" src="app.js"></script>

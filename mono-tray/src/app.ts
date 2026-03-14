@@ -2,8 +2,10 @@ import { PlexusRpcClient } from '../generated/transport';
 import { createPlayerClient } from '../generated/player/client';
 import { createPlayerPlaylistClient } from '../generated/player/playlist/client';
 import { createMonoClient } from '../generated/mono/client';
-import { extractData } from '../generated/rpc';
 import type { MonoEvent, MonoEventNowPlaying, MonoEventCover, MonoEventPlaylistInfo, MonoEventSearchTrack, MonoEventQueue, QueuedTrack } from '../generated/player/types';
+import { PlexusRpcClient as SubstratePlexusRpcClient } from '../generated-substrate/transport';
+import { createClaudecodeClient } from '../generated-substrate/claudecode/client';
+import type { ChatEvent } from '../generated-substrate/claudecode/types';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 
 // --- Show/hide animations + click-away dismiss ---
@@ -14,13 +16,14 @@ const appEl = document.getElementById('app')!;
 const appWindow = getCurrentWindow();
 let hiding = false;
 
-type ViewName = 'now-playing' | 'browse' | 'detail' | 'queue';
+type ViewName = 'now-playing' | 'browse' | 'detail' | 'queue' | 'research';
 
 const VIEW_HEIGHTS: Record<ViewName, number> = {
   'now-playing': 556,
   'browse': 600,
   'detail': 600,
   'queue': 600,
+  'research': 650,
 };
 
 listen('mono-tray://show', () => {
@@ -36,6 +39,7 @@ listen('mono-tray://hide', () => {
   hiding = true;
   // Reset to now-playing before hiding
   navigateTo('now-playing');
+  playlistPicker.classList.add('hidden');
   appEl.classList.remove('animate-in');
   appEl.classList.add('animate-out');
   setTimeout(() => {
@@ -91,6 +95,21 @@ let searchDebounce: ReturnType<typeof setTimeout> | null = null;
 let activeSearchGen: AsyncGenerator | null = null;
 let browseScrollTop = 0;
 let lastQueueLength = 0;
+let lastEnterTime = 0;
+let researchResult: { name: string; tracks: { id: number; title: string; artist: string; reason: string }[] } | null = null;
+let isResearching = false;
+let pendingAddTrackId: number | null = null;
+
+// New DOM elements
+const sparkleBtn = document.getElementById('sparkle-btn')!;
+const sparkleBadge = document.getElementById('sparkle-badge')!;
+const researchNameInput = document.getElementById('research-name') as HTMLInputElement;
+const researchTracksEl = document.getElementById('research-tracks')!;
+const researchCreateBtn = document.getElementById('research-create-btn')!;
+const researchQueueBtn = document.getElementById('research-queue-btn')!;
+const playlistPicker = document.getElementById('playlist-picker')!;
+const playlistPickerList = document.getElementById('playlist-picker-list')!;
+const playlistPickerNew = document.getElementById('playlist-picker-new')!;
 
 // --- Notifications ---
 async function initNotifications(): Promise<void> {
@@ -125,10 +144,13 @@ const player = createPlayerClient(rpc);
 const playlist = createPlayerPlaylistClient(rpc);
 const mono = createMonoClient(rpc);
 
-// Wrapper for monochrome activation (codegen uses wrong 'mono' prefix)
-async function* monoCall(method: string, params: Record<string, unknown> = {}): AsyncGenerator<MonoEvent> {
-  yield* extractData<MonoEvent>(rpc.call(`monochrome.${method}`, params));
-}
+// Substrate RPC client for AI research (claudecode)
+const substrateRpc = new SubstratePlexusRpcClient({
+  backend: 'substrate',
+  url: 'ws://127.0.0.1:4444',
+  debug: false,
+});
+const claudecode = createClaudecodeClient(substrateRpc);
 
 // Fire-and-forget RPC helper
 async function rpcFire(gen: AsyncGenerator): Promise<void> {
@@ -144,7 +166,7 @@ function formatTime(secs: number): string {
 
 async function fetchCoverArt(trackId: number): Promise<void> {
   try {
-    for await (const event of mono.cover(trackId, 320)) {
+    for await (const event of mono.cover(trackId, 640)) {
       if (event.type === 'cover') {
         const cover = event as MonoEventCover;
         albumArt.src = cover.url;
@@ -225,6 +247,10 @@ function updateBreadcrumbs(view: ViewName): void {
   } else if (view === 'queue') {
     trail.push({ label: 'Now Playing', view: 'now-playing' });
     trail.push({ label: 'Queue', current: true });
+  } else if (view === 'research') {
+    trail.push({ label: 'Now Playing', view: 'now-playing' });
+    trail.push({ label: 'Library', view: 'browse' });
+    trail.push({ label: 'Research', current: true });
   }
 
   trail.forEach((crumb, i) => {
@@ -313,6 +339,14 @@ function navigateTo(view: ViewName): void {
       navAction.classList.remove('hidden');
       navAction.title = 'Clear queue';
       break;
+    case 'research':
+      navBack.classList.remove('hidden');
+      navTitle.textContent = 'Research';
+      iconList.classList.add('hidden');
+      iconPlayAll.classList.add('hidden');
+      iconClear.classList.add('hidden');
+      navAction.classList.add('hidden');
+      break;
   }
 }
 
@@ -348,6 +382,14 @@ async function loadPlaylists(): Promise<void> {
 
 function renderPlaylistList(playlists: MonoEventPlaylistInfo[]): void {
   browseList.innerHTML = '';
+
+  // New Playlist button at top
+  const newRow = document.createElement('div');
+  newRow.className = 'new-playlist-row';
+  newRow.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg> New Playlist';
+  newRow.addEventListener('click', promptCreatePlaylist);
+  browseList.appendChild(newRow);
+
   if (playlists.length === 0) {
     const emptyEl = document.createElement('div');
     emptyEl.className = 'list-empty';
@@ -382,7 +424,7 @@ function performSearch(query: string): void {
     pl => pl.name.toLowerCase().includes(q)
   );
 
-  const gen = monoCall('search', { query, kind: 'tracks', limit: 8 });
+  const gen = mono.search(query, 'tracks', 8);
   activeSearchGen = gen;
 
   browseList.innerHTML = '';
@@ -438,11 +480,26 @@ function makePlaylistRow(pl: MonoEventPlaylistInfo): HTMLElement {
   info.appendChild(titleSpan);
   info.appendChild(sub);
 
+  // Delete button
+  const deleteBtn = document.createElement('button');
+  deleteBtn.className = 'row-action';
+  deleteBtn.title = 'Delete playlist';
+  deleteBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>';
+  deleteBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (confirm(`Delete playlist "${pl.name}"?`)) {
+      rpcFire(playlist.delete(pl.name));
+      cachedPlaylists = cachedPlaylists?.filter(p => p.name !== pl.name) || null;
+      if (cachedPlaylists) renderPlaylistList(cachedPlaylists);
+    }
+  });
+
   const chevron = document.createElement('span');
   chevron.className = 'list-row-chevron';
   chevron.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>';
 
   row.appendChild(info);
+  row.appendChild(deleteBtn);
   row.appendChild(chevron);
   return row;
 }
@@ -503,9 +560,20 @@ function renderSearchResults(results: MonoEventSearchTrack[], hasPlaylistSection
       rpcFire(player.queueAdd(track.id));
     });
 
+    // Add to playlist button
+    const plBtn = document.createElement('button');
+    plBtn.className = 'row-action';
+    plBtn.title = 'Add to playlist';
+    plBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M14 10H2v2h12v-2zm0-4H2v2h12V6zm4 8v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zM2 16h8v-2H2v2z"/></svg>';
+    plBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      showPlaylistPicker(track.id);
+    });
+
     row.appendChild(info);
     row.appendChild(playBtn);
     row.appendChild(addBtn);
+    row.appendChild(plBtn);
     browseList.appendChild(row);
   }
 }
@@ -553,9 +621,25 @@ async function loadPlaylistDetail(name: string): Promise<void> {
       sub.className = 'list-row-sub';
       sub.textContent = `${track.artist} · ${formatTime(track.durationSecs)}`;
 
+      // Remove from playlist button
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'row-action';
+      removeBtn.title = 'Remove from playlist';
+      removeBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>';
+      const trackIndex = i;
+      removeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (currentPlaylistName) {
+          rpcFire(playlist.remove(trackIndex, currentPlaylistName));
+          row.remove();
+          cachedPlaylists = null; // Invalidate cache
+        }
+      });
+
       info.appendChild(titleSpan);
       info.appendChild(sub);
       row.appendChild(info);
+      row.appendChild(removeBtn);
       detailTracks.appendChild(row);
     }
   } catch {
@@ -624,6 +708,22 @@ async function loadQueue(): Promise<void> {
       row.appendChild(info);
       queueTracksEl.appendChild(row);
     }
+
+    // Save queue as playlist button
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'save-queue-btn';
+    saveBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M17 3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V7l-4-4zm-5 16c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zm3-10H5V5h10v4z"/></svg> Save as Playlist';
+    saveBtn.addEventListener('click', () => {
+      const name = prompt('Playlist name:');
+      if (name?.trim()) {
+        rpcFire(playlist.save(name.trim()));
+        cachedPlaylists = null;
+        if (notificationsEnabled) {
+          sendNotification({ title: 'Playlist Saved', body: name.trim() });
+        }
+      }
+    });
+    queueTracksEl.appendChild(saveBtn);
   } catch {
     queueSubheader.textContent = '';
     queueTracksEl.innerHTML = '';
@@ -642,6 +742,8 @@ navBack.addEventListener('click', () => {
     navigateTo('browse');
   } else if (currentView === 'queue') {
     navigateTo('now-playing');
+  } else if (currentView === 'research') {
+    navigateTo('browse');
   }
 });
 
@@ -712,6 +814,250 @@ openLink.addEventListener('click', async (e) => {
   }
 });
 
+// --- Playlist CRUD helpers ---
+function promptCreatePlaylist(): void {
+  const name = prompt('New playlist name:');
+  if (name?.trim()) {
+    rpcFire(playlist.create(name.trim()));
+    cachedPlaylists = null;
+    loadPlaylists();
+  }
+}
+
+function showPlaylistPicker(trackId: number): void {
+  pendingAddTrackId = trackId;
+  playlistPickerList.innerHTML = '';
+
+  const playlists = cachedPlaylists || [];
+  for (const pl of playlists) {
+    const row = document.createElement('div');
+    row.className = 'list-row';
+    const info = document.createElement('div');
+    info.className = 'list-row-info';
+    const titleSpan = document.createElement('div');
+    titleSpan.className = 'list-row-title';
+    titleSpan.textContent = pl.name;
+    info.appendChild(titleSpan);
+    row.appendChild(info);
+    row.addEventListener('click', () => {
+      rpcFire(playlist.add(trackId, pl.name));
+      playlistPicker.classList.add('hidden');
+      cachedPlaylists = null;
+    });
+    playlistPickerList.appendChild(row);
+  }
+
+  playlistPicker.classList.remove('hidden');
+}
+
+playlistPickerNew.addEventListener('click', () => {
+  const name = prompt('New playlist name:');
+  if (name?.trim() && pendingAddTrackId !== null) {
+    rpcFire(playlist.create(name.trim(), null, [pendingAddTrackId]));
+    cachedPlaylists = null;
+  }
+  playlistPicker.classList.add('hidden');
+});
+
+// Close picker on background click
+playlistPicker.addEventListener('click', (e) => {
+  if (e.target === playlistPicker) {
+    playlistPicker.classList.add('hidden');
+  }
+});
+
+// --- Rename playlist via nav title click ---
+navTitle.addEventListener('dblclick', () => {
+  if (currentView === 'detail' && currentPlaylistName) {
+    const newName = prompt('Rename playlist:', currentPlaylistName);
+    if (newName?.trim() && newName.trim() !== currentPlaylistName) {
+      rpcFire(playlist.rename(currentPlaylistName, newName.trim()));
+      currentPlaylistName = newName.trim();
+      navTitle.textContent = currentPlaylistName;
+      cachedPlaylists = null;
+    }
+  }
+});
+
+// --- AI Research ---
+interface ResearchTrack {
+  id: number;
+  title: string;
+  artist: string;
+  reason: string;
+}
+
+async function researchPlaylist(query: string): Promise<void> {
+  if (isResearching) return;
+  isResearching = true;
+  sparkleBtn.classList.add('researching');
+
+  try {
+    // 1. Search monochrome for tracks matching the query
+    const searchResults: MonoEventSearchTrack[] = [];
+    for await (const event of mono.search(query, 'tracks', 50)) {
+      if (event.type === 'search_track') searchResults.push(event as MonoEventSearchTrack);
+    }
+
+    if (searchResults.length === 0) {
+      isResearching = false;
+      sparkleBtn.classList.remove('researching');
+      return;
+    }
+
+    // 2. Send to Claude via substrate claudecode for curation
+    const trackList = searchResults.map(t => ({ id: t.id, title: t.title, artist: t.artist, album: t.album }));
+    const chatPrompt = `Given these tracks from a music search for "${query}", curate a playlist. Select the best tracks that fit together, explain why each fits, and suggest a playlist name. Return ONLY valid JSON, no markdown: {"name": "...", "tracks": [{"id": N, "title": "...", "artist": "...", "reason": "..."}]}
+
+Available tracks: ${JSON.stringify(trackList)}`;
+
+    await substrateRpc.connect();
+
+    // Ensure session exists (create if needed, ignore error if already exists)
+    try {
+      await claudecode.create('haiku', 'mono-tray-research', '.', false, 'You are a music curator. Return only valid JSON, no markdown fences.');
+    } catch { /* session may already exist */ }
+
+    let fullResponse = '';
+    for await (const event of claudecode.chat('mono-tray-research', chatPrompt)) {
+      if (event.type === 'content') fullResponse += event.text;
+    }
+
+    // 3. Parse JSON from response
+    const jsonMatch = fullResponse.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      researchResult = JSON.parse(jsonMatch[0]);
+    }
+  } catch (err) {
+    console.error('Research failed:', err);
+  }
+
+  isResearching = false;
+  sparkleBtn.classList.remove('researching');
+
+  if (researchResult) {
+    sparkleBadge.classList.remove('hidden');
+    if (notificationsEnabled) {
+      sendNotification({ title: 'Playlist Research', body: `Ready: ${researchResult.name}` });
+    }
+  }
+}
+
+function showResearchResults(): void {
+  if (!researchResult) return;
+  sparkleBadge.classList.add('hidden');
+  researchNameInput.value = researchResult.name;
+  researchTracksEl.innerHTML = '';
+
+  for (const track of researchResult.tracks) {
+    const row = document.createElement('div');
+    row.className = 'list-row';
+
+    const info = document.createElement('div');
+    info.className = 'list-row-info';
+
+    const titleSpan = document.createElement('div');
+    titleSpan.className = 'list-row-title';
+    titleSpan.textContent = track.title;
+
+    const sub = document.createElement('div');
+    sub.className = 'list-row-sub';
+    sub.textContent = track.artist;
+
+    const reason = document.createElement('div');
+    reason.className = 'research-reason';
+    reason.textContent = track.reason;
+
+    info.appendChild(titleSpan);
+    info.appendChild(sub);
+    info.appendChild(reason);
+
+    // Play button
+    const playBtn = document.createElement('button');
+    playBtn.className = 'row-action';
+    playBtn.title = 'Play';
+    playBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
+    playBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      rpcFire(player.play(track.id));
+    });
+
+    // Queue button
+    const queueAddBtn = document.createElement('button');
+    queueAddBtn.className = 'row-action';
+    queueAddBtn.title = 'Add to queue';
+    queueAddBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>';
+    queueAddBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      rpcFire(player.queueAdd(track.id));
+    });
+
+    // Remove button
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'row-action';
+    removeBtn.title = 'Remove';
+    removeBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>';
+    removeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (researchResult) {
+        researchResult.tracks = researchResult.tracks.filter(t => t.id !== track.id);
+        row.remove();
+      }
+    });
+
+    row.appendChild(info);
+    row.appendChild(playBtn);
+    row.appendChild(queueAddBtn);
+    row.appendChild(removeBtn);
+    researchTracksEl.appendChild(row);
+  }
+
+  navigateTo('research');
+}
+
+// Research view buttons
+researchCreateBtn.addEventListener('click', () => {
+  if (!researchResult) return;
+  const name = researchNameInput.value.trim() || researchResult.name;
+  const trackIds = researchResult.tracks.map(t => t.id);
+  rpcFire(playlist.create(name, null, trackIds));
+  cachedPlaylists = null;
+  researchResult = null;
+  navigateTo('browse');
+  loadPlaylists();
+});
+
+researchQueueBtn.addEventListener('click', () => {
+  if (!researchResult) return;
+  for (const track of researchResult.tracks) {
+    rpcFire(player.queueAdd(track.id));
+  }
+});
+
+// Sparkle button: show research results or no-op
+sparkleBtn.addEventListener('click', () => {
+  if (researchResult) {
+    showResearchResults();
+  } else if (!isResearching && searchInput.value.trim()) {
+    researchPlaylist(searchInput.value.trim());
+  }
+});
+
+// Double-enter triggers AI research
+searchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    const now = Date.now();
+    if (now - lastEnterTime < 400) {
+      // Double enter
+      e.preventDefault();
+      if (searchInput.value.trim()) {
+        researchPlaylist(searchInput.value.trim());
+      }
+    }
+    lastEnterTime = now;
+  }
+});
+
 // --- Main loop: stream now_playing with reconnection ---
 async function streamNowPlaying(): Promise<void> {
   while (true) {
@@ -739,7 +1085,7 @@ async function streamNowPlaying(): Promise<void> {
 // --- JS hover polyfill (CSS :hover doesn't fire in NSPanel WebView) ---
 // Native global mouseMoved monitor in Rust emits coordinates via Tauri events.
 // We use elementFromPoint to resolve the hovered element.
-const hoverSelectors = '.nav-btn, .control-btn, .list-row, .row-action, #queue-btn, #open-link, .crumb, #progress-bar';
+const hoverSelectors = '.nav-btn, .control-btn, .list-row, .row-action, #queue-btn, #open-link, .crumb, #progress-bar, .action-btn, .new-playlist-row, .save-queue-btn';
 let currentHover: Element | null = null;
 
 listen<{ x: number; y: number }>('mono-tray://mousemove', (event) => {
@@ -760,7 +1106,7 @@ listen('mono-tray://mouseleave', () => {
 
 // --- Click feedback: add .clicked class that lingers and fades out ---
 // Use 'click' event (not mousedown) since click events fire reliably in NSPanel
-const clickSelectors = '.nav-btn, .control-btn, .list-row, .row-action, #queue-btn';
+const clickSelectors = '.nav-btn, .control-btn, .list-row, .row-action, #queue-btn, .action-btn, .new-playlist-row, .save-queue-btn';
 document.addEventListener('click', (e) => {
   const el = e.target as Element;
   const target = el.closest?.(clickSelectors);

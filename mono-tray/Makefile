@@ -13,8 +13,8 @@ all: codegen frontend app
 dev: frontend
 	cargo tauri dev
 
-# Generate TypeScript client from live plexus-mono server
-# Uses synapse.config.json for backend, port, transport, output dir
+# Generate TypeScript clients from live servers
+# Single config handles both monochrome and substrate targets
 codegen:
 	synapse-cc build
 

@@ -1,0 +1,39 @@
+{
+  "cache": {
+    "file_hashes": {
+      "claudecode/client.ts": "636728ad524c17c8",
+      "claudecode/index.ts": "92e376f3f4309522",
+      "claudecode/types.ts": "ebae6ad6e7aacc67",
+      "cone/types.ts": "c11c24c1595bf7e3",
+      "index.ts": "327f942783869561",
+      "package.json": "3894b504808e4637",
+      "rpc.ts": "e9fd65874333ae25",
+      "test/bidir-smoke.test.ts": "bcd06c94f9d4c352",
+      "test/smoke.test.ts": "a295034bc894304b",
+      "transport.ts": "8fc77d72d6b90f89",
+      "tsconfig.json": "ebf6a311e13a8eed",
+      "types.ts": "89502efc00dbb8b8"
+    }
+  },
+  "format_version": "2.0",
+  "generation": {
+    "ir_version": "2.0",
+    "toolchain": [
+      {
+        "tool": "synapse-cc",
+        "version": "0.2.0"
+      },
+      {
+        "tool": "synapse",
+        "version": "0.2.0.0"
+      },
+      {
+        "tool": "hub-codegen",
+        "version": "0.2.0"
+      }
+    ]
+  },
+  "source": {
+    "backend": "substrate"
+  }
+}

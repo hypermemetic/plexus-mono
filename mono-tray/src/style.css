@@ -598,3 +598,217 @@ body {
   font-size: 12px;
   padding: 24px 0;
 }
+
+/* Search container with sparkle button */
+#search-container {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+#search-container #search-input {
+  flex: 1;
+}
+
+#sparkle-btn {
+  position: relative;
+  flex-shrink: 0;
+}
+
+#sparkle-btn.researching svg {
+  animation: sparkle-spin 1s linear infinite;
+}
+
+@keyframes sparkle-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+#sparkle-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 6px;
+  height: 6px;
+  background: var(--accent);
+  border-radius: 50%;
+}
+
+/* Research results view */
+#view-container[data-view="research"] { transform: translateX(-400%); }
+
+#research-header {
+  padding: 0 2px;
+}
+
+#research-name {
+  width: 100%;
+  height: 32px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  padding: 0 10px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+#research-name:focus {
+  border-color: var(--accent);
+}
+
+#research-tracks {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  max-height: 420px;
+  scrollbar-width: none;
+}
+
+#research-tracks::-webkit-scrollbar {
+  display: none;
+}
+
+.research-reason {
+  font-size: 10px;
+  color: var(--accent);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#research-actions {
+  display: flex;
+  gap: 8px;
+  padding: 4px 2px;
+}
+
+.action-btn {
+  flex: 1;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.action-btn:hover, .action-btn.hover {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.action-btn.primary {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+
+.action-btn.primary:hover, .action-btn.primary.hover {
+  background: #1ed760;
+}
+
+/* Playlist picker overlay */
+#playlist-picker {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.75);
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius);
+  backdrop-filter: blur(4px);
+}
+
+#playlist-picker.hidden {
+  display: none;
+}
+
+#playlist-picker-content {
+  width: 260px;
+  max-height: 320px;
+  background: var(--bg);
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+#playlist-picker-title {
+  font-size: 13px;
+  font-weight: 600;
+  padding: 10px 12px 6px;
+  color: var(--text);
+}
+
+#playlist-picker-list {
+  overflow-y: auto;
+  max-height: 220px;
+  scrollbar-width: none;
+}
+
+#playlist-picker-list::-webkit-scrollbar {
+  display: none;
+}
+
+#playlist-picker-new {
+  border: none;
+  background: none;
+  border-top: 1px solid var(--border);
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  color: var(--accent);
+}
+
+/* New playlist row at top of browse */
+.new-playlist-row {
+  display: flex;
+  align-items: center;
+  padding: 8px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s;
+  gap: 8px;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+
+.new-playlist-row:hover, .new-playlist-row.hover {
+  background: var(--accent-dim);
+}
+
+/* Save queue button in queue view */
+.save-queue-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  margin-top: 4px;
+}
+
+.save-queue-btn:hover, .save-queue-btn.hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-dim);
+}
