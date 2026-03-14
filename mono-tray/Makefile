@@ -4,7 +4,7 @@
 #   - plexus-mono server running on port 4448 (for codegen)
 #   - synapse-cc, bun, cargo-tauri installed
 
-.PHONY: all dev build codegen codegen-force frontend app run install clean
+.PHONY: all dev build codegen codegen-force frontend app run restart install install-user clean
 
 # Full build: codegen → frontend → native app
 all: codegen frontend app
@@ -30,14 +30,24 @@ frontend:
 app: frontend
 	cargo tauri build
 
-# Kill old instance, rebuild, and launch
-run: app
+# Build, install to ~/Applications, kill old instance, and launch
+run: install-user
 	-pkill -f 'Mono Tray' 2>/dev/null; sleep 0.5
-	open src-tauri/target/release/bundle/macos/Mono\ Tray.app
+	open ~/Applications/Mono\ Tray.app
 
-# Install to /Applications
+# Kill and relaunch installed app (no rebuild)
+restart:
+	-pkill -f 'Mono Tray' 2>/dev/null; sleep 0.5
+	open ~/Applications/Mono\ Tray.app
+
+# Install to /Applications (requires sudo)
 install: app
 	cp -r src-tauri/target/release/bundle/macos/Mono\ Tray.app /Applications/
+
+# Install to ~/Applications (no sudo)
+install-user: app
+	mkdir -p ~/Applications
+	cp -r src-tauri/target/release/bundle/macos/Mono\ Tray.app ~/Applications/
 
 # Clean build artifacts
 clean:

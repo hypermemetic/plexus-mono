@@ -17,7 +17,7 @@
         "title": "Mono Tray",
         "width": 352,
         "height": 556,
-        "resizable": false,
+        "resizable": true,
         "decorations": false,
         "transparent": true,
         "visible": false,
@@ -31,7 +31,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["app"],
     "icon": [
       "icons/icon.png"
     ],

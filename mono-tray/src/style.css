@@ -46,6 +46,7 @@ body {
   box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5), 0 0 0 0.5px rgba(255, 255, 255, 0.08);
   opacity: 0;
   transform: translateY(-6px);
+  overflow: hidden;
 }
 
 #app.animate-in {
@@ -108,27 +109,63 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.15s, color 0.15s;
+  transition: background 0.3s ease-out, color 0.3s ease-out;
   width: 28px;
   height: 28px;
   flex-shrink: 0;
 }
 
-.nav-btn:hover {
-  background: var(--bg-secondary);
-  color: var(--text);
+.nav-btn:hover, .nav-btn.hover {
+  background: var(--accent-dim);
+  color: var(--accent);
+  transition: background 0.08s ease-in, color 0.08s;
+}
+
+.nav-btn:active {
+  background: var(--accent);
+  color: var(--bg);
+  transition: background 0.02s;
 }
 
 .nav-btn.hidden {
   visibility: hidden;
 }
 
-/* Sliding view container */
-#view-clip {
-  overflow: hidden;
-  position: relative;
+/* Breadcrumbs */
+#breadcrumbs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px 4px;
+  font-size: 10px;
+  color: var(--text-secondary);
+  min-height: 0;
+  flex-shrink: 0;
 }
 
+#breadcrumbs:empty {
+  display: none;
+}
+
+.crumb {
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.crumb:hover, .crumb.hover {
+  color: var(--accent);
+}
+
+.crumb-sep {
+  opacity: 0.5;
+}
+
+.crumb-current {
+  color: var(--text);
+  font-weight: 500;
+}
+
+/* Sliding view container */
 #view-container {
   display: flex;
   transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
@@ -137,6 +174,7 @@ body {
 #view-container[data-view="now-playing"] { transform: translateX(0); }
 #view-container[data-view="browse"]      { transform: translateX(-100%); }
 #view-container[data-view="detail"]      { transform: translateX(-200%); }
+#view-container[data-view="queue"]       { transform: translateX(-300%); }
 
 .view-panel {
   min-width: 100%;
@@ -146,6 +184,7 @@ body {
   flex-direction: column;
   gap: 10px;
 }
+
 
 /* Disconnect overlay */
 #disconnect-overlay {
@@ -275,7 +314,8 @@ body {
   transition: opacity 0.15s;
 }
 
-#progress-bar:hover #progress-thumb {
+#progress-bar:hover #progress-thumb,
+#progress-bar.hover #progress-thumb {
   opacity: 1;
 }
 
@@ -305,11 +345,17 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.15s, transform 0.1s;
+  transition: background 0.3s ease-out, transform 0.1s;
 }
 
-.control-btn:hover {
-  background: var(--bg-secondary);
+.control-btn:hover, .control-btn.hover {
+  background: var(--accent-dim);
+  transition: background 0.08s ease-in;
+}
+
+.control-btn:active {
+  background: var(--accent);
+  transition: background 0.02s;
 }
 
 .control-btn:active {
@@ -323,7 +369,7 @@ body {
   height: 44px;
 }
 
-.control-btn.primary:hover {
+.control-btn.primary:hover, .control-btn.primary.hover {
   background: #fff;
 }
 
@@ -373,9 +419,29 @@ body {
   padding: 0 4px;
 }
 
+#queue-btn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 10px;
+  font-family: inherit;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  transition: color 0.15s, background 0.15s;
+}
+
+#queue-btn:hover, #queue-btn.hover {
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+
 #queue-info {
   font-size: 10px;
-  color: var(--text-secondary);
+  color: inherit;
 }
 
 #open-link {
@@ -385,7 +451,7 @@ body {
   transition: color 0.15s;
 }
 
-#open-link:hover {
+#open-link:hover, #open-link.hover {
   color: var(--accent);
 }
 
@@ -415,9 +481,10 @@ body {
   border-color: var(--accent);
 }
 
-/* Browse & Detail lists */
+/* Browse, Detail & Queue lists */
 #browse-list,
-#detail-tracks {
+#detail-tracks,
+#queue-tracks {
   display: flex;
   flex-direction: column;
   overflow-y: auto;
@@ -426,11 +493,13 @@ body {
 }
 
 #browse-list::-webkit-scrollbar,
-#detail-tracks::-webkit-scrollbar {
+#detail-tracks::-webkit-scrollbar,
+#queue-tracks::-webkit-scrollbar {
   display: none;
 }
 
-#detail-subheader {
+#detail-subheader,
+#queue-subheader {
   font-size: 11px;
   color: var(--text-secondary);
   padding: 0 4px;
@@ -443,12 +512,22 @@ body {
   padding: 8px 6px;
   border-radius: 6px;
   cursor: pointer;
-  transition: background 0.12s;
+  transition: background 0.3s ease-out;
   gap: 8px;
 }
 
-.list-row:hover {
-  background: var(--bg-secondary);
+.list-row:hover, .list-row.hover {
+  background: var(--accent-dim);
+  transition: background 0.08s ease-in;
+}
+
+.list-row:active {
+  background: var(--accent);
+  transition: background 0.02s;
+}
+
+.list-row.active {
+  background: var(--accent-dim);
 }
 
 .list-row-info {
@@ -489,13 +568,20 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: color 0.15s, background 0.15s;
+  transition: color 0.3s ease-out, background 0.3s ease-out;
   flex-shrink: 0;
 }
 
-.row-action:hover {
+.row-action:hover, .row-action.hover {
   color: var(--accent);
   background: var(--accent-dim);
+  transition: background 0.08s ease-in, color 0.08s;
+}
+
+.row-action:active {
+  background: var(--accent);
+  color: var(--bg);
+  transition: background 0.02s;
 }
 
 /* Empty / loading state */

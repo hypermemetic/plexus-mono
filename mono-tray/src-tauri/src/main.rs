@@ -22,7 +22,56 @@ fn set_activation_policy() {
 #[cfg(not(target_os = "macos"))]
 fn set_activation_policy() {}
 
-/// Convert the Tauri NSWindow into an NSPanel for fullscreen overlay support.
+/// Register a proper NSPanel subclass at runtime with canBecomeKeyWindow override.
+/// object_setClass alone doesn't allow method overrides — we need ClassDecl.
+#[cfg(target_os = "macos")]
+fn register_panel_class() -> &'static objc::runtime::Class {
+    use objc::declare::ClassDecl;
+    use objc::runtime::{Class, Object, Sel, BOOL, YES};
+    use cocoa::base::id;
+
+    static INIT: std::sync::Once = std::sync::Once::new();
+    static mut PANEL_CLASS: Option<&'static Class> = None;
+
+    extern "C" fn can_become_key(_this: &Object, _sel: Sel) -> BOOL {
+        YES
+    }
+
+    extern "C" fn can_become_main(_this: &Object, _sel: Sel) -> BOOL {
+        YES
+    }
+
+    // Forward sendEvent: to super, ensuring mouseMoved events are dispatched
+    extern "C" fn send_event(this: &Object, _sel: Sel, event: id) {
+        unsafe {
+            let superclass = Class::get("NSPanel").unwrap();
+            let _: () = msg_send![super(this, superclass), sendEvent: event];
+        }
+    }
+
+    unsafe {
+        INIT.call_once(|| {
+            let superclass = Class::get("NSPanel").unwrap();
+            let mut decl = ClassDecl::new("MonoTrayPanel", superclass).unwrap();
+            decl.add_method(
+                sel!(canBecomeKeyWindow),
+                can_become_key as extern "C" fn(&Object, Sel) -> BOOL,
+            );
+            decl.add_method(
+                sel!(canBecomeMainWindow),
+                can_become_main as extern "C" fn(&Object, Sel) -> BOOL,
+            );
+            decl.add_method(
+                sel!(sendEvent:),
+                send_event as extern "C" fn(&Object, Sel, id),
+            );
+            PANEL_CLASS = Some(decl.register());
+        });
+        PANEL_CLASS.unwrap()
+    }
+}
+
+/// Convert the Tauri NSWindow into a MonoTrayPanel (NSPanel subclass).
 #[cfg(target_os = "macos")]
 fn configure_as_panel(window: &tauri::WebviewWindow) {
     use cocoa::appkit::{NSWindow, NSWindowCollectionBehavior};
@@ -36,9 +85,8 @@ fn configure_as_panel(window: &tauri::WebviewWindow) {
 
     let ns_window: id = window.ns_window().unwrap() as id;
     unsafe {
-        // Swap class from NSWindow → NSPanel (subclass, layout-compatible)
-        let panel_class =
-            objc::runtime::Class::get("NSPanel").expect("NSPanel class not found");
+        // Swap class from NSWindow → MonoTrayPanel (proper subclass with overrides)
+        let panel_class = register_panel_class();
         object_setClass(
             ns_window as *mut c_void,
             panel_class as *const _ as *const c_void,
@@ -49,8 +97,7 @@ fn configure_as_panel(window: &tauri::WebviewWindow) {
         let new_mask = current_mask | (1u64 << 7);
         let _: () = msg_send![ns_window, setStyleMask: new_mask];
 
-        // Window level + collection behavior for fullscreen overlay
-        ns_window.setLevel_(25); // NSStatusWindowLevel
+        // Collection behavior for fullscreen overlay
         ns_window.setCollectionBehavior_(
             NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
                 | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary
@@ -62,6 +109,9 @@ fn configure_as_panel(window: &tauri::WebviewWindow) {
         let _: () = msg_send![ns_window, setHidesOnDeactivate: false];
         let _: () = msg_send![ns_window, setFloatingPanel: true];
         let _: () = msg_send![ns_window, setWorksWhenModal: true];
+        let _: () = msg_send![ns_window, setAcceptsMouseMovedEvents: true];
+        let _: () = msg_send![ns_window, setBecomesKeyOnlyIfNeeded: false];
+        let _: () = msg_send![ns_window, setIgnoresMouseEvents: false];
 
         // Transparent window — no native background, no native shadow
         let _: () = msg_send![ns_window, setOpaque: false];
@@ -71,7 +121,6 @@ fn configure_as_panel(window: &tauri::WebviewWindow) {
         let _: () = msg_send![ns_window, setHasShadow: false];
 
         // Force WKWebView to be transparent (re-apply after class swap)
-        // Use setValue:forKey: which is safe on any NSObject
         let content_view: id = msg_send![ns_window, contentView];
         let subviews: id = msg_send![content_view, subviews];
         let count: usize = msg_send![subviews, count];
@@ -86,6 +135,11 @@ fn configure_as_panel(window: &tauri::WebviewWindow) {
                 let _: () = msg_send![subview, setValue: no forKey: key];
             }
         }
+
+        // Set window level LAST — Chromium checks window.level > NSNormalWindowLevel
+        // to decide whether to deliver mouseMoved to unfocused windows.
+        // Setting it after all other config ensures it sticks.
+        ns_window.setLevel_(25); // NSStatusWindowLevel
     }
 }
 
@@ -116,7 +170,6 @@ fn install_click_outside_monitor(window: tauri::WebviewWindow) {
                         && mouse_loc.y >= frame.origin.y
                         && mouse_loc.y <= frame.origin.y + frame.size.height;
                     if !inside {
-                        // Emit hide event so JS can animate out
                         let _ = win_clone.emit("mono-tray://hide", ());
                     }
                 }
@@ -136,6 +189,60 @@ fn install_click_outside_monitor(window: tauri::WebviewWindow) {
 
 #[cfg(not(target_os = "macos"))]
 fn install_click_outside_monitor(_window: tauri::WebviewWindow) {}
+
+/// Install a global mouse-move monitor that forwards cursor position to JS
+/// when the cursor is inside our panel. This bypasses WebKit's broken
+/// mouseMoved delivery in non-activating panels.
+#[cfg(target_os = "macos")]
+fn install_mouse_move_monitor(window: tauri::WebviewWindow) {
+    use cocoa::base::id;
+    use cocoa::foundation::NSRect;
+    use std::sync::Arc;
+
+    let win = Arc::new(window);
+    let win_clone = win.clone();
+
+    let block = block::ConcreteBlock::new(move |_event: id| {
+        if let Some(ns_win) = win_clone.ns_window().ok().map(|w| w as id) {
+            unsafe {
+                let visible: bool = msg_send![ns_win, isVisible];
+                if !visible {
+                    return;
+                }
+                let mouse_loc: cocoa::foundation::NSPoint =
+                    msg_send![objc::runtime::Class::get("NSEvent").unwrap(), mouseLocation];
+                let frame: NSRect = msg_send![ns_win, frame];
+                let inside = mouse_loc.x >= frame.origin.x
+                    && mouse_loc.x <= frame.origin.x + frame.size.width
+                    && mouse_loc.y >= frame.origin.y
+                    && mouse_loc.y <= frame.origin.y + frame.size.height;
+                if inside {
+                    // Convert to window-local coordinates (origin top-left for web)
+                    let local_x = mouse_loc.x - frame.origin.x;
+                    let local_y = frame.size.height - (mouse_loc.y - frame.origin.y);
+                    let _ = win_clone.emit(
+                        "mono-tray://mousemove",
+                        serde_json::json!({ "x": local_x, "y": local_y }),
+                    );
+                } else {
+                    let _ = win_clone.emit("mono-tray://mouseleave", ());
+                }
+            }
+        }
+    });
+    let block = block.copy();
+
+    unsafe {
+        let ns_event_class = objc::runtime::Class::get("NSEvent").unwrap();
+        // NSMouseMovedMask (1 << 5)
+        let mask: u64 = 1 << 5;
+        let _: id = msg_send![ns_event_class, addGlobalMonitorForEventsMatchingMask:mask handler:&*block];
+        std::mem::forget(block);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_mouse_move_monitor(_window: tauri::WebviewWindow) {}
 
 /// Hide the panel when the active macOS Space changes (e.g. swipe, Mission Control).
 #[cfg(target_os = "macos")]
@@ -176,10 +283,8 @@ fn show_window(app: &tauri::AppHandle, tray_rect: Option<tauri::Rect>) {
     if let Some(window) = app.get_webview_window("main") {
         let visible = window.is_visible().unwrap_or(false);
         if visible {
-            // Request animated hide
             let _ = app.emit("mono-tray://hide", ());
         } else {
-            // Position below tray icon with a small gap
             if let Some(rect) = tray_rect {
                 let scale = window.scale_factor().unwrap_or(2.0);
                 let pos = rect.position.to_logical::<f64>(scale);
@@ -193,6 +298,25 @@ fn show_window(app: &tauri::AppHandle, tray_rect: Option<tauri::Rect>) {
 
             let _ = window.show();
             let _ = window.set_focus();
+
+            // Explicitly make key window + first responder on the WKWebView
+            #[cfg(target_os = "macos")]
+            {
+                use cocoa::base::id;
+                let ns_win: id = window.ns_window().unwrap() as id;
+                unsafe {
+                    let _: () = msg_send![ns_win, makeKeyAndOrderFront: cocoa::base::nil];
+                    // Make WKWebView first responder so it receives mouse events
+                    let content_view: id = msg_send![ns_win, contentView];
+                    let subviews: id = msg_send![content_view, subviews];
+                    let count: usize = msg_send![subviews, count];
+                    if count > 0 {
+                        let webview: id = msg_send![subviews, objectAtIndex: 0u64];
+                        let _: () = msg_send![ns_win, makeFirstResponder: webview];
+                    }
+                }
+            }
+
             let _ = app.emit("mono-tray://show", ());
         }
     }
@@ -208,7 +332,8 @@ fn main() {
             if let Some(window) = app.get_webview_window("main") {
                 configure_as_panel(&window);
                 install_space_change_monitor(window.clone());
-                install_click_outside_monitor(window);
+                install_click_outside_monitor(window.clone());
+                install_mouse_move_monitor(window);
             }
 
             let _tray = TrayIconBuilder::new()

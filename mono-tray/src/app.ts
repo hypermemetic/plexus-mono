@@ -1,17 +1,27 @@
 import { PlexusRpcClient } from '../generated/transport';
 import { createPlayerClient } from '../generated/player/client';
 import { createPlayerPlaylistClient } from '../generated/player/playlist/client';
+import { createMonoClient } from '../generated/mono/client';
 import { extractData } from '../generated/rpc';
 import type { MonoEvent, MonoEventNowPlaying, MonoEventCover, MonoEventPlaylistInfo, MonoEventSearchTrack, MonoEventQueue, QueuedTrack } from '../generated/player/types';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 
 // --- Show/hide animations + click-away dismiss ---
 import { listen } from '@tauri-apps/api/event';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 
 const appEl = document.getElementById('app')!;
 const appWindow = getCurrentWindow();
 let hiding = false;
+
+type ViewName = 'now-playing' | 'browse' | 'detail' | 'queue';
+
+const VIEW_HEIGHTS: Record<ViewName, number> = {
+  'now-playing': 556,
+  'browse': 600,
+  'detail': 600,
+  'queue': 600,
+};
 
 listen('mono-tray://show', () => {
   hiding = false;
@@ -24,6 +34,8 @@ listen('mono-tray://show', () => {
 listen('mono-tray://hide', () => {
   if (hiding) return;
   hiding = true;
+  // Reset to now-playing before hiding
+  navigateTo('now-playing');
   appEl.classList.remove('animate-in');
   appEl.classList.add('animate-out');
   setTimeout(() => {
@@ -46,6 +58,7 @@ const iconPause = document.getElementById('icon-pause')!;
 const btnPrevious = document.getElementById('btn-previous')!;
 const btnNext = document.getElementById('btn-next')!;
 const volumeSlider = document.getElementById('volume-slider') as HTMLInputElement;
+const queueBtn = document.getElementById('queue-btn')!;
 const queueInfo = document.getElementById('queue-info')!;
 const openLink = document.getElementById('open-link') as HTMLAnchorElement;
 const disconnectOverlay = document.getElementById('disconnect-overlay')!;
@@ -56,23 +69,28 @@ const navTitle = document.getElementById('nav-title')!;
 const navAction = document.getElementById('nav-action')!;
 const iconList = document.getElementById('icon-list')!;
 const iconPlayAll = document.getElementById('icon-play-all')!;
+const iconClear = document.getElementById('icon-clear')!;
 const viewContainer = document.getElementById('view-container')!;
 const searchInput = document.getElementById('search-input') as HTMLInputElement;
 const browseList = document.getElementById('browse-list')!;
 const detailSubheader = document.getElementById('detail-subheader')!;
 const detailTracks = document.getElementById('detail-tracks')!;
+const queueSubheader = document.getElementById('queue-subheader')!;
+const queueTracksEl = document.getElementById('queue-tracks')!;
+const breadcrumbs = document.getElementById('breadcrumbs')!;
 
 // --- State ---
 let currentTrackId: number | null = null;
 let isPlaying = false;
 let volumeDebounce: ReturnType<typeof setTimeout> | null = null;
 let notificationsEnabled = false;
-let currentView: 'now-playing' | 'browse' | 'detail' = 'now-playing';
+let currentView: ViewName = 'now-playing';
 let cachedPlaylists: MonoEventPlaylistInfo[] | null = null;
 let currentPlaylistName: string | null = null;
 let searchDebounce: ReturnType<typeof setTimeout> | null = null;
 let activeSearchGen: AsyncGenerator | null = null;
 let browseScrollTop = 0;
+let lastQueueLength = 0;
 
 // --- Notifications ---
 async function initNotifications(): Promise<void> {
@@ -105,6 +123,7 @@ const rpc = new PlexusRpcClient({
 
 const player = createPlayerClient(rpc);
 const playlist = createPlayerPlaylistClient(rpc);
+const mono = createMonoClient(rpc);
 
 // Wrapper for monochrome activation (codegen uses wrong 'mono' prefix)
 async function* monoCall(method: string, params: Record<string, unknown> = {}): AsyncGenerator<MonoEvent> {
@@ -125,7 +144,7 @@ function formatTime(secs: number): string {
 
 async function fetchCoverArt(trackId: number): Promise<void> {
   try {
-    for await (const event of monoCall('cover', { id: trackId, size: 320 })) {
+    for await (const event of mono.cover(trackId, 320)) {
       if (event.type === 'cover') {
         const cover = event as MonoEventCover;
         albumArt.src = cover.url;
@@ -164,6 +183,7 @@ function updateUI(np: MonoEventNowPlaying): void {
     volumeSlider.value = String(Math.round(np.volume * 100));
   }
 
+  lastQueueLength = np.queueLength;
   if (np.queueLength > 0) {
     queueInfo.textContent = `${np.queueLength} in queue`;
   } else {
@@ -188,14 +208,72 @@ function updateUI(np: MonoEventNowPlaying): void {
 }
 
 // --- Navigation ---
-function navigateTo(view: 'now-playing' | 'browse' | 'detail'): void {
+function updateBreadcrumbs(view: ViewName): void {
+  breadcrumbs.innerHTML = '';
+  if (view === 'now-playing') return;
+
+  type Crumb = { label: string; view: ViewName } | { label: string; current: true };
+  const trail: Crumb[] = [];
+
+  if (view === 'browse') {
+    trail.push({ label: 'Now Playing', view: 'now-playing' });
+    trail.push({ label: 'Library', current: true });
+  } else if (view === 'detail') {
+    trail.push({ label: 'Now Playing', view: 'now-playing' });
+    trail.push({ label: 'Library', view: 'browse' });
+    trail.push({ label: currentPlaylistName || 'Playlist', current: true });
+  } else if (view === 'queue') {
+    trail.push({ label: 'Now Playing', view: 'now-playing' });
+    trail.push({ label: 'Queue', current: true });
+  }
+
+  trail.forEach((crumb, i) => {
+    if (i > 0) {
+      const sep = document.createElement('span');
+      sep.className = 'crumb-sep';
+      sep.textContent = '›';
+      breadcrumbs.appendChild(sep);
+    }
+    const el = document.createElement('span');
+    if ('current' in crumb) {
+      el.className = 'crumb-current';
+      el.textContent = crumb.label;
+    } else {
+      el.className = 'crumb';
+      el.textContent = crumb.label;
+      const target = crumb.view;
+      el.addEventListener('click', () => {
+        navigateTo(target);
+        if (target === 'browse') loadPlaylists();
+      });
+    }
+    breadcrumbs.appendChild(el);
+  });
+}
+
+function navigateTo(view: ViewName): void {
   // Save browse scroll before leaving
   if (currentView === 'browse' && view !== 'browse') {
     browseScrollTop = browseList.scrollTop;
   }
 
+  // Clear search when leaving browse
+  if (currentView === 'browse' && view === 'now-playing') {
+    searchInput.value = '';
+    if (activeSearchGen) {
+      activeSearchGen.return(undefined);
+      activeSearchGen = null;
+    }
+  }
+
   currentView = view;
   viewContainer.dataset.view = view;
+
+  // Resize window to fit view
+  appWindow.setSize(new LogicalSize(352, VIEW_HEIGHTS[view]));
+
+  // Update breadcrumbs
+  updateBreadcrumbs(view);
 
   // Update nav header
   switch (view) {
@@ -204,6 +282,7 @@ function navigateTo(view: 'now-playing' | 'browse' | 'detail'): void {
       navTitle.textContent = '';
       iconList.classList.remove('hidden');
       iconPlayAll.classList.add('hidden');
+      iconClear.classList.add('hidden');
       navAction.classList.remove('hidden');
       navAction.title = 'Library';
       break;
@@ -212,8 +291,8 @@ function navigateTo(view: 'now-playing' | 'browse' | 'detail'): void {
       navTitle.textContent = 'Library';
       iconList.classList.add('hidden');
       iconPlayAll.classList.add('hidden');
+      iconClear.classList.add('hidden');
       navAction.classList.add('hidden');
-      // Restore scroll position
       requestAnimationFrame(() => { browseList.scrollTop = browseScrollTop; });
       break;
     case 'detail':
@@ -221,8 +300,18 @@ function navigateTo(view: 'now-playing' | 'browse' | 'detail'): void {
       navTitle.textContent = currentPlaylistName || 'Playlist';
       iconList.classList.add('hidden');
       iconPlayAll.classList.remove('hidden');
+      iconClear.classList.add('hidden');
       navAction.classList.remove('hidden');
       navAction.title = 'Play All';
+      break;
+    case 'queue':
+      navBack.classList.remove('hidden');
+      navTitle.textContent = 'Queue';
+      iconList.classList.add('hidden');
+      iconPlayAll.classList.add('hidden');
+      iconClear.classList.remove('hidden');
+      navAction.classList.remove('hidden');
+      navAction.title = 'Clear queue';
       break;
   }
 }
@@ -273,14 +362,12 @@ function renderPlaylistList(playlists: MonoEventPlaylistInfo[]): void {
 
 // --- Search ---
 function performSearch(query: string): void {
-  // Cancel previous search
   if (activeSearchGen) {
     activeSearchGen.return(undefined);
     activeSearchGen = null;
   }
 
   if (!query.trim()) {
-    // Show playlists when search is cleared
     if (cachedPlaylists) {
       renderPlaylistList(cachedPlaylists);
     } else {
@@ -291,16 +378,13 @@ function performSearch(query: string): void {
 
   const q = query.toLowerCase();
 
-  // Filter playlists locally
   const matchingPlaylists = (cachedPlaylists || []).filter(
     pl => pl.name.toLowerCase().includes(q)
   );
 
-  // Search music provider concurrently
   const gen = monoCall('search', { query, kind: 'tracks', limit: 8 });
   activeSearchGen = gen;
 
-  // Render playlist matches immediately
   browseList.innerHTML = '';
   if (matchingPlaylists.length > 0) {
     const header = document.createElement('div');
@@ -324,7 +408,6 @@ function performSearch(query: string): void {
     } catch {
       // Search cancelled or failed
     }
-    // Only render if this is still the active search
     if (activeSearchGen === gen) {
       renderSearchResults(results, matchingPlaylists.length > 0);
       activeSearchGen = null;
@@ -442,7 +525,6 @@ async function loadPlaylistDetail(name: string): Promise<void> {
   try {
     let tracks: QueuedTrack[] = [];
     for await (const event of playlist.show(name)) {
-      // playlist.show emits playlist_info then a single queue event with all tracks
       if (event.type === 'queue') {
         tracks = (event as MonoEventQueue).tracks;
       }
@@ -486,12 +568,80 @@ async function loadPlaylistDetail(name: string): Promise<void> {
   }
 }
 
+// --- Queue view ---
+async function loadQueue(): Promise<void> {
+  queueTracksEl.innerHTML = '';
+  queueSubheader.textContent = 'Loading...';
+
+  try {
+    let tracks: QueuedTrack[] = [];
+    let currentIndex: number | null = null;
+    for await (const event of player.queueGet()) {
+      if (event.type === 'queue') {
+        const q = event as MonoEventQueue;
+        tracks = q.tracks;
+        currentIndex = q.currentIndex;
+      }
+    }
+
+    if (tracks.length === 0) {
+      queueSubheader.textContent = '';
+      queueTracksEl.innerHTML = '';
+      const emptyEl = document.createElement('div');
+      emptyEl.className = 'list-empty';
+      emptyEl.textContent = 'Queue is empty';
+      queueTracksEl.appendChild(emptyEl);
+      return;
+    }
+
+    queueSubheader.textContent = `${tracks.length} track${tracks.length !== 1 ? 's' : ''}`;
+    queueTracksEl.innerHTML = '';
+
+    for (let i = 0; i < tracks.length; i++) {
+      const track = tracks[i];
+      const row = document.createElement('div');
+      row.className = 'list-row';
+      if (i === currentIndex) row.classList.add('active');
+
+      row.addEventListener('click', () => {
+        rpcFire(player.play(track.id));
+        navigateTo('now-playing');
+      });
+
+      const info = document.createElement('div');
+      info.className = 'list-row-info';
+
+      const titleSpan = document.createElement('div');
+      titleSpan.className = 'list-row-title';
+      titleSpan.textContent = track.title;
+
+      const sub = document.createElement('div');
+      sub.className = 'list-row-sub';
+      sub.textContent = `${track.artist} · ${formatTime(track.durationSecs)}`;
+
+      info.appendChild(titleSpan);
+      info.appendChild(sub);
+      row.appendChild(info);
+      queueTracksEl.appendChild(row);
+    }
+  } catch {
+    queueSubheader.textContent = '';
+    queueTracksEl.innerHTML = '';
+    const errEl = document.createElement('div');
+    errEl.className = 'list-empty';
+    errEl.textContent = 'Failed to load queue';
+    queueTracksEl.appendChild(errEl);
+  }
+}
+
 // --- Nav button handlers ---
 navBack.addEventListener('click', () => {
   if (currentView === 'browse') {
     navigateTo('now-playing');
   } else if (currentView === 'detail') {
     navigateTo('browse');
+  } else if (currentView === 'queue') {
+    navigateTo('now-playing');
   }
 });
 
@@ -500,10 +650,23 @@ navAction.addEventListener('click', () => {
     navigateTo('browse');
     loadPlaylists();
   } else if (currentView === 'detail' && currentPlaylistName) {
-    // Play all
     rpcFire(playlist.play(currentPlaylistName));
     navigateTo('now-playing');
+  } else if (currentView === 'queue') {
+    rpcFire(player.queueClear());
+    queueTracksEl.innerHTML = '';
+    queueSubheader.textContent = '';
+    const emptyEl = document.createElement('div');
+    emptyEl.className = 'list-empty';
+    emptyEl.textContent = 'Queue cleared';
+    queueTracksEl.appendChild(emptyEl);
   }
+});
+
+// Queue button in footer
+queueBtn.addEventListener('click', () => {
+  navigateTo('queue');
+  loadQueue();
 });
 
 // --- Transport controls ---
@@ -568,10 +731,32 @@ async function streamNowPlaying(): Promise<void> {
     // Disconnected — show overlay and retry
     disconnectOverlay.classList.remove('hidden');
     rpc.disconnect();
-    cachedPlaylists = null; // Invalidate cache on disconnect
+    cachedPlaylists = null;
     await new Promise(r => setTimeout(r, 2000));
   }
 }
+
+// --- JS hover polyfill (CSS :hover doesn't fire in NSPanel WebView) ---
+// Native global mouseMoved monitor in Rust emits coordinates via Tauri events.
+// We use elementFromPoint to resolve the hovered element.
+const hoverSelectors = '.nav-btn, .control-btn, .list-row, .row-action, #queue-btn, #open-link, .crumb, #progress-bar';
+let currentHover: Element | null = null;
+
+listen<{ x: number; y: number }>('mono-tray://mousemove', (event) => {
+  const { x, y } = event.payload;
+  const el = document.elementFromPoint(x, y);
+  const target = el?.closest?.(hoverSelectors) ?? null;
+  if (target !== currentHover) {
+    currentHover?.classList.remove('hover');
+    target?.classList.add('hover');
+    currentHover = target;
+  }
+});
+
+listen('mono-tray://mouseleave', () => {
+  currentHover?.classList.remove('hover');
+  currentHover = null;
+});
 
 // Initialize nav to now-playing
 navigateTo('now-playing');
