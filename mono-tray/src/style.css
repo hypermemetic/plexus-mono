@@ -121,10 +121,10 @@ body {
   transition: background 0.08s ease-in, color 0.08s;
 }
 
-.nav-btn:active {
+.nav-btn.clicked {
   background: var(--accent);
   color: var(--bg);
-  transition: background 0.02s;
+  transition: background 0.06s ease-in, color 0.06s;
 }
 
 .nav-btn.hidden {
@@ -350,16 +350,13 @@ body {
 
 .control-btn:hover, .control-btn.hover {
   background: var(--accent-dim);
-  transition: background 0.08s ease-in;
+  transition: background 0.08s ease-in, transform 0.08s;
 }
 
-.control-btn:active {
+.control-btn.clicked {
   background: var(--accent);
-  transition: background 0.02s;
-}
-
-.control-btn:active {
   transform: scale(0.92);
+  transition: background 0.06s ease-in, transform 0.06s;
 }
 
 .control-btn.primary {
@@ -371,6 +368,11 @@ body {
 
 .control-btn.primary:hover, .control-btn.primary.hover {
   background: #fff;
+}
+
+.control-btn.primary.clicked {
+  background: var(--accent);
+  color: var(--text);
 }
 
 .hidden {
@@ -437,6 +439,11 @@ body {
 #queue-btn:hover, #queue-btn.hover {
   color: var(--accent);
   background: var(--accent-dim);
+}
+
+#queue-btn.clicked {
+  color: var(--bg);
+  background: var(--accent);
 }
 
 #queue-info {
@@ -521,9 +528,9 @@ body {
   transition: background 0.08s ease-in;
 }
 
-.list-row:active {
+.list-row.clicked {
   background: var(--accent);
-  transition: background 0.02s;
+  transition: background 0.06s ease-in;
 }
 
 .list-row.active {
@@ -578,10 +585,10 @@ body {
   transition: background 0.08s ease-in, color 0.08s;
 }
 
-.row-action:active {
+.row-action.clicked {
   background: var(--accent);
   color: var(--bg);
-  transition: background 0.02s;
+  transition: background 0.06s ease-in, color 0.06s;
 }
 
 /* Empty / loading state */

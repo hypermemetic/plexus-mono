@@ -758,6 +758,18 @@ listen('mono-tray://mouseleave', () => {
   currentHover = null;
 });
 
+// --- Click feedback: add .clicked class that lingers and fades out ---
+// Use 'click' event (not mousedown) since click events fire reliably in NSPanel
+const clickSelectors = '.nav-btn, .control-btn, .list-row, .row-action, #queue-btn';
+document.addEventListener('click', (e) => {
+  const el = e.target as Element;
+  const target = el.closest?.(clickSelectors);
+  if (target) {
+    target.classList.add('clicked');
+    setTimeout(() => target.classList.remove('clicked'), 200);
+  }
+}, true);
+
 // Initialize nav to now-playing
 navigateTo('now-playing');
 
