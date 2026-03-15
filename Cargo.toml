@@ -34,14 +34,14 @@ jsonrpsee = { version = "0.26", features = ["server", "macros"] }
 uuid = { version = "1.6", features = ["v4", "v5"] }
 
 # HTTP client for Monochrome API
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.13", features = ["json", "stream"] }
 
 # Base64 decoding for stream manifests
 base64 = "0.22"
 
 # Audio playback
-rodio = { version = "0.20", default-features = false, features = ["symphonia-all"] }
-stream-download = { version = "0.9", features = ["reqwest"] }
+rodio = { version = "0.22", default-features = false, features = ["symphonia-all", "playback"] }
+stream-download = { version = "0.24", features = ["reqwest"] }
 
 # OS media controls (play/pause keys, Now Playing widget)
 souvlaki = "0.8"
@@ -58,3 +58,4 @@ clap = { version = "4", features = ["derive", "env"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 chrono = "0.4"
 anyhow = "1"
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }

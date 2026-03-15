@@ -15,6 +15,7 @@ use plexus_core::Activation;
 use crate::client::MonoClient;
 use crate::player::Player;
 use crate::playlist::PlaylistHub;
+use crate::storage::MonoStorage;
 use crate::types::MonoEvent;
 
 /// Stateful playback engine activation with queue and playlist management.
@@ -26,8 +27,8 @@ pub struct PlayerHub {
 
 impl PlayerHub {
     /// Create a new PlayerHub from a shared MonoClient.
-    pub async fn new(client: Arc<MonoClient>) -> Self {
-        let player = Player::new(client.clone()).await;
+    pub async fn new(client: Arc<MonoClient>, storage: Arc<MonoStorage>) -> Self {
+        let player = Player::new(client.clone(), storage).await;
         let playlist = PlaylistHub::new(player.clone(), client);
         Self { player, playlist }
     }
@@ -255,18 +256,20 @@ impl PlayerHub {
         description = "Add a track to the end of the playback queue. Auto-starts if nothing is playing.",
         params(
             id = "Tidal track ID",
-            quality = "Quality: LOSSLESS (default), HI_RES_LOSSLESS, HIGH, LOW"
+            quality = "Quality: LOSSLESS (default), HI_RES_LOSSLESS, HIGH, LOW",
+            source = "Where this track was queued from (playlist name, album, etc.)"
         )
     )]
     pub async fn queue_add(
         &self,
         id: u64,
         quality: Option<String>,
+        source: Option<String>,
     ) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let player = self.player.clone();
         let quality = quality.unwrap_or_else(|| "LOSSLESS".to_string());
         stream! {
-            match player.queue_add(id, &quality).await {
+            match player.queue_add_with_source(id, &quality, source).await {
                 Ok(()) => yield MonoEvent::PlayerAck {
                     action: "queue_add".to_string(),
                     message: format!("track {id} added to queue"),
@@ -391,6 +394,8 @@ impl PlayerHub {
                 preamp: np.preamp,
                 queue_length: np.queue_length,
                 url: np.url,
+                is_liked: np.is_liked,
+                is_downloaded: np.is_downloaded,
             };
         }
     }
@@ -439,6 +444,8 @@ impl PlayerHub {
                     preamp: np.preamp,
                     queue_length: np.queue_length,
                     url: np.url,
+                    is_liked: np.is_liked,
+                    is_downloaded: np.is_downloaded,
                 };
             }
             // Then stream updates
@@ -456,6 +463,8 @@ impl PlayerHub {
                     preamp: np.preamp,
                     queue_length: np.queue_length,
                     url: np.url,
+                    is_liked: np.is_liked,
+                    is_downloaded: np.is_downloaded,
                 };
             }
         }
@@ -579,6 +588,152 @@ impl PlayerHub {
             yield MonoEvent::PlayerAck {
                 action: "history_clear".to_string(),
                 message: "listen history cleared".to_string(),
+            };
+        }
+    }
+
+    /// Toggle like on a track
+    #[plexus_macros::hub_method(
+        description = "Toggle like/heart on a track. Returns the new liked state.",
+        params(id = "Tidal track ID")
+    )]
+    pub async fn like(
+        &self,
+        id: u64,
+    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        stream! {
+            match player.toggle_like(id).await {
+                Ok(liked) => yield MonoEvent::PlayerAck {
+                    action: "like".to_string(),
+                    message: if liked { format!("liked track {id}") } else { format!("unliked track {id}") },
+                },
+                Err(e) => yield MonoEvent::Error { message: e },
+            }
+        }
+    }
+
+    /// Get all liked track IDs
+    #[plexus_macros::hub_method(
+        description = "Get all liked track IDs (most recently liked first)"
+    )]
+    pub async fn liked_tracks(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        stream! {
+            match player.liked_ids().await {
+                Ok(ids) => {
+                    let tracks: Vec<crate::types::QueuedTrack> = ids.iter().map(|&id| {
+                        crate::types::QueuedTrack {
+                            id,
+                            title: String::new(),
+                            artist: String::new(),
+                            album: String::new(),
+                            duration_secs: 0,
+                            quality: String::new(),
+                            cover_id: None,
+                            source: Some("liked".to_string()),
+                        }
+                    }).collect();
+                    yield MonoEvent::Queue {
+                        tracks,
+                        current_index: None,
+                    };
+                }
+                Err(e) => yield MonoEvent::Error { message: e },
+            }
+        }
+    }
+
+    /// Download a track to local storage
+    #[plexus_macros::hub_method(
+        streaming,
+        description = "Download a track to ~/Music/mono-tray/{artist}/{album}/ and register for offline playback",
+        params(
+            id = "Tidal track ID (if omitted, downloads the current track)",
+            quality = "Quality: LOSSLESS (default), HI_RES_LOSSLESS, HIGH, LOW"
+        )
+    )]
+    pub async fn download_track(
+        &self,
+        id: Option<u64>,
+        quality: Option<String>,
+    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        let quality = quality.unwrap_or_else(|| "LOSSLESS".to_string());
+        stream! {
+            // Resolve track ID — use current track if not specified
+            let track_id = match id {
+                Some(id) => id,
+                None => {
+                    let (current, _) = player.queue_get().await;
+                    match current {
+                        Some(t) => t.id,
+                        None => {
+                            yield MonoEvent::Error { message: "no track playing and no id specified".to_string() };
+                            return;
+                        }
+                    }
+                }
+            };
+            match player.download_track(track_id, &quality).await {
+                Ok(mut rx) => {
+                    while let Some(event) = rx.recv().await {
+                        yield event;
+                    }
+                }
+                Err(e) => yield MonoEvent::Error { message: e },
+            }
+        }
+    }
+
+    /// Delete a downloaded track from local storage
+    #[plexus_macros::hub_method(
+        description = "Delete a downloaded track from local storage and remove the file",
+        params(id = "Tidal track ID (if omitted, uses current track)")
+    )]
+    pub async fn delete_download(
+        &self,
+        id: Option<u64>,
+    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        stream! {
+            let track_id = match id {
+                Some(id) => id,
+                None => {
+                    let (current, _) = player.queue_get().await;
+                    match current {
+                        Some(t) => t.id,
+                        None => {
+                            yield MonoEvent::Error { message: "no track playing and no id specified".to_string() };
+                            return;
+                        }
+                    }
+                }
+            };
+            match player.delete_download(track_id).await {
+                Ok(path) => yield MonoEvent::PlayerAck {
+                    action: "delete_download".to_string(),
+                    message: match path {
+                        Some(p) => format!("deleted download: {p}"),
+                        None => format!("track {track_id} was not downloaded"),
+                    },
+                },
+                Err(e) => yield MonoEvent::Error { message: e },
+            }
+        }
+    }
+
+    /// Get playback history (previously played tracks)
+    #[plexus_macros::hub_method(
+        description = "Get the list of previously played tracks (most recent last, frontend reverses)"
+    )]
+    pub async fn history_list(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        stream! {
+            let tracks = player.get_history().await;
+            yield MonoEvent::Queue {
+                tracks,
+                current_index: None,
             };
         }
     }

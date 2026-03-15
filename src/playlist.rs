@@ -13,6 +13,8 @@ use std::sync::Arc;
 use plexus_core::plexus::{ChildRouter, PlexusError, PlexusStream};
 use plexus_core::Activation;
 
+use serde_json::Value;
+
 use crate::client::MonoClient;
 use crate::player::Player;
 use crate::types::{MonoEvent, QueuedTrack};
@@ -77,6 +79,33 @@ impl PlaylistHub {
     fn now_iso() -> String {
         chrono::Utc::now().to_rfc3339()
     }
+
+    fn research_dir(&self) -> PathBuf {
+        self.data_dir.parent().unwrap_or(&self.data_dir).join("research")
+    }
+
+    fn research_path(&self, name: &str) -> PathBuf {
+        self.research_dir().join(format!("{name}.json"))
+    }
+
+    fn write_research(&self, name: &str, data: &Value) -> Result<(), String> {
+        let dir = self.research_dir();
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("failed to create research dir: {e}"))?;
+        let path = self.research_path(name);
+        let json = serde_json::to_string_pretty(data)
+            .map_err(|e| format!("failed to serialize research: {e}"))?;
+        std::fs::write(&path, json)
+            .map_err(|e| format!("failed to write research: {e}"))
+    }
+
+    fn load_research(&self, name: &str) -> Result<Value, String> {
+        let path = self.research_path(name);
+        let data = std::fs::read_to_string(&path)
+            .map_err(|e| format!("research '{name}' not found: {e}"))?;
+        serde_json::from_str(&data)
+            .map_err(|e| format!("failed to parse research '{name}': {e}"))
+    }
 }
 
 #[plexus_macros::hub_methods(
@@ -120,11 +149,11 @@ impl PlaylistHub {
                         let info = client.track_info(id).await.ok();
                         match info {
                             Some(MonoEvent::Track { title, artist, album, duration_secs, cover_id, .. }) => {
-                                QueuedTrack { id, title, artist, album, duration_secs, quality: q, cover_id }
+                                QueuedTrack { id, title, artist, album, duration_secs, quality: q, cover_id, source: None }
                             }
                             _ => QueuedTrack {
                                 id, title: format!("Track {id}"), artist: String::new(),
-                                album: String::new(), duration_secs: 0, quality: q, cover_id: None,
+                                album: String::new(), duration_secs: 0, quality: q, cover_id: None, source: None,
                             },
                         }
                     }
@@ -325,7 +354,7 @@ impl PlaylistHub {
             let track_info = hub.client.track_info(id).await.ok();
             let queued = match track_info {
                 Some(MonoEvent::Track { title, artist, album, duration_secs, cover_id, .. }) => {
-                    QueuedTrack { id, title, artist, album, duration_secs, quality, cover_id }
+                    QueuedTrack { id, title, artist, album, duration_secs, quality, cover_id, source: None }
                 }
                 _ => QueuedTrack {
                     id,
@@ -335,6 +364,7 @@ impl PlaylistHub {
                     duration_secs: 0,
                     quality,
                     cover_id: None,
+                    source: None,
                 },
             };
             let track_title = queued.title.clone();
@@ -486,7 +516,7 @@ impl PlaylistHub {
             hub.player.stop().await;
             hub.player.queue_clear().await;
             for track in &data.tracks {
-                match hub.player.queue_add(track.id, &track.quality).await {
+                match hub.player.queue_add_with_source(track.id, &track.quality, Some(name.clone())).await {
                     Ok(()) => {}
                     Err(e) => {
                         yield MonoEvent::Error { message: e };
@@ -537,6 +567,52 @@ impl PlaylistHub {
                 Ok(()) => yield MonoEvent::PlayerAck {
                     action: "playlist_save".into(),
                     message: format!("saved {count} tracks as playlist '{name}'"),
+                },
+                Err(e) => yield MonoEvent::Error { message: e },
+            }
+        }
+    }
+
+    /// Save AI research data associated with a playlist
+    #[plexus_macros::hub_method(
+        description = "Save research data (search suggestions, all found tracks, Claude output) for a playlist",
+        params(
+            name = "Playlist name this research is associated with",
+            data = "Research data as JSON (searches, found tracks, curation output, etc.)"
+        )
+    )]
+    pub async fn research_save(
+        &self,
+        name: String,
+        data: Value,
+    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let hub = self.clone();
+        stream! {
+            match hub.write_research(&name, &data) {
+                Ok(()) => yield MonoEvent::PlayerAck {
+                    action: "research_save".into(),
+                    message: format!("saved research for '{name}'"),
+                },
+                Err(e) => yield MonoEvent::Error { message: e },
+            }
+        }
+    }
+
+    /// Get research data for a playlist
+    #[plexus_macros::hub_method(
+        description = "Retrieve saved research data for a playlist",
+        params(name = "Playlist name")
+    )]
+    pub async fn research_get(
+        &self,
+        name: String,
+    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let hub = self.clone();
+        stream! {
+            match hub.load_research(&name) {
+                Ok(data) => yield MonoEvent::PlayerAck {
+                    action: "research_get".into(),
+                    message: serde_json::to_string(&data).unwrap_or_default(),
                 },
                 Err(e) => yield MonoEvent::Error { message: e },
             }

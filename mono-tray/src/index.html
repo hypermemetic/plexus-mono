@@ -114,6 +114,21 @@
             </svg>
             <span id="queue-info"></span>
           </button>
+          <button id="like-btn" class="hidden" title="Like">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+            </svg>
+          </button>
+          <button id="np-download-btn" class="hidden" title="Download">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+            </svg>
+          </button>
+          <button id="history-btn" title="History">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/>
+            </svg>
+          </button>
           <a id="open-link" href="#" title="Open on Monochrome">
             Open on Monochrome ↗
           </a>
@@ -131,11 +146,18 @@
             <span id="sparkle-badge" class="hidden"></span>
           </button>
         </div>
+        <div id="search-tabs" class="hidden">
+          <button class="search-tab active" data-kind="tracks">Tracks</button>
+          <button class="search-tab" data-kind="albums">Albums</button>
+          <button class="search-tab" data-kind="artists">Artists</button>
+        </div>
+        <div id="research-status" class="hidden"></div>
         <div id="browse-list"></div>
       </div>
 
       <!-- View 3: Playlist Detail -->
       <div id="view-detail" class="view-panel">
+        <div id="detail-cover"><img id="detail-cover-img" src="" alt="" /></div>
         <div id="detail-subheader"></div>
         <div id="detail-tracks"></div>
       </div>
@@ -153,9 +175,15 @@
         </div>
         <div id="research-tracks"></div>
         <div id="research-actions">
-          <button id="research-create-btn" class="action-btn primary">Create Playlist</button>
+          <button id="research-create-btn" class="action-btn primary">Done</button>
           <button id="research-queue-btn" class="action-btn">Add All to Queue</button>
         </div>
+      </div>
+
+      <!-- View 6: History -->
+      <div id="view-history" class="view-panel">
+        <div id="history-subheader"></div>
+        <div id="history-tracks"></div>
       </div>
 
     </div>

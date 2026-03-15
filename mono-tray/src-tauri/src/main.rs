@@ -4,7 +4,8 @@
 extern crate objc;
 
 use tauri::{
-    tray::{MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    menu::{MenuBuilder, MenuItemBuilder},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager,
 };
 
@@ -323,13 +324,82 @@ fn main() {
                 install_mouse_move_monitor(window);
             }
 
+            // Right-click context menu
+            let open_music = MenuItemBuilder::with_id("open_music", "Open Music Folder").build(app)?;
+            let restart_server = MenuItemBuilder::with_id("restart_server", "Restart Server").build(app)?;
+            let restart_app = MenuItemBuilder::with_id("restart_app", "Restart").build(app)?;
+            let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+            let menu = MenuBuilder::new(app)
+                .item(&open_music)
+                .item(&restart_server)
+                .separator()
+                .item(&restart_app)
+                .item(&quit)
+                .build()?;
+
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .icon_as_template(true)
                 .tooltip("Mono Tray")
+                .menu(&menu)
                 .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| {
+                    match event.id().as_ref() {
+                        "open_music" => {
+                            let music_dir = dirs::home_dir()
+                                .unwrap_or_default()
+                                .join("Music/mono-tray");
+                            let _ = std::process::Command::new("open").arg(music_dir).spawn();
+                        }
+                        "restart_server" => {
+                            // Kill backend on port 4448, then relaunch
+                            let _ = std::process::Command::new("sh")
+                                .args(["-c", "lsof -ti :4448 | xargs kill 2>/dev/null"])
+                                .spawn();
+                            // Give it a moment to die, then relaunch
+                            let handle = app.clone();
+                            std::thread::spawn(move || {
+                                std::thread::sleep(std::time::Duration::from_millis(500));
+                                let _ = std::process::Command::new("cargo")
+                                    .args(["run", "--bin", "plexus-mono"])
+                                    .current_dir(
+                                        std::env::current_exe()
+                                            .ok()
+                                            .and_then(|p| {
+                                                // Walk up from the .app bundle to find the repo
+                                                let mut dir = p.parent()?.to_path_buf();
+                                                while dir.pop() {
+                                                    if dir.join("Cargo.toml").exists()
+                                                        && dir.join("src/bin/plexus_mono.rs").exists()
+                                                    {
+                                                        return Some(dir);
+                                                    }
+                                                }
+                                                None
+                                            })
+                                            .unwrap_or_else(|| {
+                                                dirs::home_dir()
+                                                    .unwrap_or_default()
+                                                    .join("dev/controlflow/hypermemetic/plexus-mono")
+                                            }),
+                                    )
+                                    .spawn();
+                                // Notify frontend to reconnect
+                                let _ = handle.emit("mono-tray://show", ());
+                            });
+                        }
+                        "restart_app" => {
+                            app.restart();
+                        }
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    }
+                })
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
                         rect,
                         ..

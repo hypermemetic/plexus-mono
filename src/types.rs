@@ -227,6 +227,12 @@ pub enum MonoEvent {
         queue_length: usize,
         /// Monochrome web URL for the current track
         url: Option<String>,
+        /// Whether the current track is liked
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        is_liked: Option<bool>,
+        /// Whether the current track is downloaded locally
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        is_downloaded: Option<bool>,
     },
 
     /// Queue contents snapshot
@@ -341,6 +347,9 @@ pub struct QueuedTrack {
     pub quality: String,
     /// Cover art UUID
     pub cover_id: Option<String>,
+    /// Where this track was queued from (playlist name, album, search, etc.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 /// Search target kind

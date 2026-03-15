@@ -9,6 +9,7 @@ pub mod hub;
 pub mod player;
 pub mod player_hub;
 pub mod playlist;
+pub mod storage;
 pub mod types;
 
 // Required by plexus-macros generated code

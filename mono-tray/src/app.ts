@@ -2,10 +2,9 @@ import { PlexusRpcClient } from '../generated/transport';
 import { createPlayerClient } from '../generated/player/client';
 import { createPlayerPlaylistClient } from '../generated/player/playlist/client';
 import { createMonoClient } from '../generated/mono/client';
-import type { MonoEvent, MonoEventNowPlaying, MonoEventCover, MonoEventPlaylistInfo, MonoEventSearchTrack, MonoEventQueue, QueuedTrack } from '../generated/player/types';
+import type { MonoEvent, MonoEventNowPlaying, MonoEventCover, MonoEventPlaylistInfo, MonoEventSearchTrack, MonoEventSearchAlbum, MonoEventSearchArtist, MonoEventAlbum, MonoEventAlbumTrack, MonoEventArtist, MonoEventQueue, QueuedTrack } from '../generated/player/types';
 import { PlexusRpcClient as SubstratePlexusRpcClient } from '../generated-substrate/transport';
 import { createClaudecodeClient } from '../generated-substrate/claudecode/client';
-import type { ChatEvent } from '../generated-substrate/claudecode/types';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 
 // --- Show/hide animations + click-away dismiss ---
@@ -16,7 +15,7 @@ const appEl = document.getElementById('app')!;
 const appWindow = getCurrentWindow();
 let hiding = false;
 
-type ViewName = 'now-playing' | 'browse' | 'detail' | 'queue' | 'research';
+type ViewName = 'now-playing' | 'browse' | 'detail' | 'queue' | 'research' | 'history';
 
 const VIEW_HEIGHTS: Record<ViewName, number> = {
   'now-playing': 556,
@@ -24,6 +23,7 @@ const VIEW_HEIGHTS: Record<ViewName, number> = {
   'detail': 600,
   'queue': 600,
   'research': 650,
+  'history': 600,
 };
 
 listen('mono-tray://show', () => {
@@ -77,6 +77,8 @@ const iconClear = document.getElementById('icon-clear')!;
 const viewContainer = document.getElementById('view-container')!;
 const searchInput = document.getElementById('search-input') as HTMLInputElement;
 const browseList = document.getElementById('browse-list')!;
+const detailCover = document.getElementById('detail-cover')!;
+const detailCoverImg = document.getElementById('detail-cover-img') as HTMLImageElement;
 const detailSubheader = document.getElementById('detail-subheader')!;
 const detailTracks = document.getElementById('detail-tracks')!;
 const queueSubheader = document.getElementById('queue-subheader')!;
@@ -85,24 +87,30 @@ const breadcrumbs = document.getElementById('breadcrumbs')!;
 
 // --- State ---
 let currentTrackId: number | null = null;
+let currentDurationSecs = 0;
 let isPlaying = false;
 let volumeDebounce: ReturnType<typeof setTimeout> | null = null;
 let notificationsEnabled = false;
 let currentView: ViewName = 'now-playing';
 let cachedPlaylists: MonoEventPlaylistInfo[] | null = null;
 let currentPlaylistName: string | null = null;
+let currentDetailAlbumId: number | null = null;
 let searchDebounce: ReturnType<typeof setTimeout> | null = null;
 let activeSearchGen: AsyncGenerator | null = null;
 let browseScrollTop = 0;
 let lastQueueLength = 0;
+let searchKind: 'tracks' | 'albums' | 'artists' = 'tracks';
 let lastEnterTime = 0;
-let researchResult: { name: string; tracks: { id: number; title: string; artist: string; reason: string }[] } | null = null;
+let researchResult: { name: string; tracks: ResearchTrack[] } | null = null;
 let isResearching = false;
 let pendingAddTrackId: number | null = null;
+let claudeSessionReady = false;
+const likedSet = new Set<number>();
 
 // New DOM elements
 const sparkleBtn = document.getElementById('sparkle-btn')!;
 const sparkleBadge = document.getElementById('sparkle-badge')!;
+const researchStatus = document.getElementById('research-status')!;
 const researchNameInput = document.getElementById('research-name') as HTMLInputElement;
 const researchTracksEl = document.getElementById('research-tracks')!;
 const researchCreateBtn = document.getElementById('research-create-btn')!;
@@ -110,6 +118,11 @@ const researchQueueBtn = document.getElementById('research-queue-btn')!;
 const playlistPicker = document.getElementById('playlist-picker')!;
 const playlistPickerList = document.getElementById('playlist-picker-list')!;
 const playlistPickerNew = document.getElementById('playlist-picker-new')!;
+const likeBtn = document.getElementById('like-btn')!;
+const npDownloadBtn = document.getElementById('np-download-btn')!;
+const historyBtn = document.getElementById('history-btn')!;
+const historySubheader = document.getElementById('history-subheader')!;
+const historyTracksEl = document.getElementById('history-tracks')!;
 
 // --- Notifications ---
 async function initNotifications(): Promise<void> {
@@ -179,6 +192,208 @@ async function fetchCoverArt(trackId: number): Promise<void> {
   }
 }
 
+const DOWNLOAD_DIR = '~/Music/mono-tray';
+const downloadIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>';
+const checkIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>';
+
+function makeDownloadBtn(trackId: number): HTMLButtonElement {
+  const btn = document.createElement('button');
+  btn.className = 'row-action';
+  btn.title = 'Download';
+  btn.innerHTML = downloadIcon;
+  btn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    btn.classList.add('downloading');
+    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" class="spin"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="31.4 31.4" stroke-linecap="round"/></svg>';
+    try {
+      for await (const event of mono.download(trackId, DOWNLOAD_DIR)) {
+        if (event.type === 'download_progress') {
+          const pct = (event as any).percent;
+          if (pct != null) btn.title = `${Math.round(pct)}%`;
+        } else if (event.type === 'download_complete') {
+          btn.innerHTML = checkIcon;
+          btn.classList.remove('downloading');
+          btn.classList.add('done');
+          btn.title = 'Downloaded';
+          setTimeout(() => {
+            btn.innerHTML = downloadIcon;
+            btn.classList.remove('done');
+            btn.title = 'Download';
+          }, 3000);
+          return;
+        }
+      }
+    } catch {
+      btn.innerHTML = downloadIcon;
+      btn.classList.remove('downloading');
+      btn.title = 'Download failed';
+    }
+  });
+  return btn;
+}
+
+const placeholderSvg = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
+
+/** Create a lazy-loading cover art thumbnail (uses track ID) */
+function makeCoverThumb(trackId: number): HTMLDivElement {
+  const wrap = document.createElement('div');
+  wrap.className = 'cover-thumb loading';
+  const img = document.createElement('img');
+  img.alt = '';
+  const placeholder = document.createElement('div');
+  placeholder.className = 'cover-thumb-placeholder';
+  placeholder.innerHTML = placeholderSvg;
+  wrap.appendChild(placeholder);
+  wrap.appendChild(img);
+  // Lazy load cover
+  (async () => {
+    try {
+      for await (const event of mono.cover(trackId, 640)) {
+        if (event.type === 'cover') {
+          img.src = (event as MonoEventCover).url;
+          img.onload = () => {
+            img.classList.add('loaded');
+            wrap.classList.remove('loading');
+            wrap.classList.add('has-cover');
+          };
+          return;
+        }
+      }
+    } catch { /* no cover */ }
+    // No cover found
+    wrap.classList.remove('loading');
+    wrap.classList.add('failed');
+  })();
+  return wrap;
+}
+
+/** Create a cover thumb for an album (loads album to get first track ID) */
+function makeAlbumCoverThumb(albumId: number): HTMLDivElement {
+  const wrap = document.createElement('div');
+  wrap.className = 'cover-thumb loading';
+  const img = document.createElement('img');
+  img.alt = '';
+  const placeholder = document.createElement('div');
+  placeholder.className = 'cover-thumb-placeholder';
+  placeholder.innerHTML = placeholderSvg;
+  wrap.appendChild(placeholder);
+  wrap.appendChild(img);
+  // Get first track from album, then load its cover
+  (async () => {
+    try {
+      let firstTrackId: number | null = null;
+      for await (const event of mono.album(albumId)) {
+        if (event.type === 'album_track' && !firstTrackId) {
+          firstTrackId = (event as MonoEventAlbumTrack).id;
+          break;
+        }
+      }
+      if (firstTrackId) {
+        for await (const event of mono.cover(firstTrackId, 640)) {
+          if (event.type === 'cover') {
+            img.src = (event as MonoEventCover).url;
+            img.onload = () => {
+              img.classList.add('loaded');
+              wrap.classList.remove('loading');
+              wrap.classList.add('has-cover');
+            };
+            return;
+          }
+        }
+      }
+    } catch { /* no cover */ }
+    wrap.classList.remove('loading');
+    wrap.classList.add('failed');
+  })();
+  return wrap;
+}
+
+// --- Clickable artist/album helpers ---
+function makeArtistLink(name: string): HTMLSpanElement {
+  const span = document.createElement('span');
+  span.className = 'clickable-meta';
+  span.textContent = name;
+  span.addEventListener('click', (e) => {
+    e.stopPropagation();
+    currentPlaylistName = name;
+    navigateTo('detail');
+    loadArtistAlbums(0, name);
+  });
+  return span;
+}
+
+function makeAlbumLink(albumName: string, trackId?: number): HTMLSpanElement {
+  const span = document.createElement('span');
+  span.className = 'clickable-meta';
+  span.textContent = albumName;
+  span.addEventListener('click', (e) => {
+    e.stopPropagation();
+    navigateToAlbum(albumName, trackId);
+  });
+  return span;
+}
+
+async function navigateToAlbum(albumName: string, trackId?: number): Promise<void> {
+  currentPlaylistName = albumName;
+  navigateTo('detail');
+  detailTracks.innerHTML = '';
+  detailSubheader.textContent = 'Loading...';
+
+  // If we have a trackId, look up the track to get the real albumId
+  if (trackId) {
+    try {
+      for await (const event of mono.track(trackId)) {
+        if (event.type === 'track') {
+          loadAlbumDetail((event as import('../generated/player/types').MonoEventTrack).albumId);
+          return;
+        }
+      }
+    } catch { /* fall through to search */ }
+  }
+
+  // Fallback: search by album name
+  for await (const event of mono.search(albumName, 'albums', 5)) {
+    if (event.type === 'search_album') {
+      const album = event as MonoEventSearchAlbum;
+      if (album.title.toLowerCase() === albumName.toLowerCase()) {
+        loadAlbumDetail(album.id);
+        return;
+      }
+    }
+  }
+  // Last resort: first result
+  for await (const event of mono.search(albumName, 'albums', 1)) {
+    if (event.type === 'search_album') {
+      loadAlbumDetail((event as MonoEventSearchAlbum).id);
+      return;
+    }
+  }
+  detailSubheader.textContent = 'Album not found';
+}
+
+/** Build a subtitle element with clickable artist/album spans */
+function makeTrackSub(artist: string, opts?: { album?: string; durationSecs?: number; trackId?: number }): HTMLDivElement {
+  const sub = document.createElement('div');
+  sub.className = 'list-row-sub';
+
+  sub.appendChild(makeArtistLink(artist));
+
+  if (opts?.album) {
+    const sep = document.createTextNode(' — ');
+    sub.appendChild(sep);
+    sub.appendChild(makeAlbumLink(opts.album, opts.trackId));
+  }
+
+  if (opts?.durationSecs != null) {
+    const sep = document.createTextNode(' · ');
+    sub.appendChild(sep);
+    const dur = document.createTextNode(formatTime(opts.durationSecs));
+    sub.appendChild(dur);
+  }
+
+  return sub;
+}
+
 function updatePlayPauseIcon(status: string): void {
   isPlaying = status === 'playing' || status === 'buffering' || status === 'starting';
   iconPlay.classList.toggle('hidden', isPlaying);
@@ -188,15 +403,25 @@ function updatePlayPauseIcon(status: string): void {
 function updateUI(np: MonoEventNowPlaying): void {
   titleEl.textContent = np.title || 'Not Playing';
 
-  const parts: string[] = [];
-  if (np.artist) parts.push(np.artist);
-  if (np.album) parts.push(np.album);
-  artistAlbumEl.textContent = parts.join(' — ');
+  // Clickable artist/album in now-playing
+  artistAlbumEl.innerHTML = '';
+  if (np.artist) {
+    artistAlbumEl.appendChild(makeArtistLink(np.artist));
+    if (np.album) {
+      artistAlbumEl.appendChild(document.createTextNode(' — '));
+      artistAlbumEl.appendChild(makeAlbumLink(np.album, np.trackId));
+    }
+  } else if (np.album) {
+    artistAlbumEl.appendChild(makeAlbumLink(np.album, np.trackId));
+  }
 
-  const pct = np.durationSecs > 0 ? (np.positionSecs / np.durationSecs) * 100 : 0;
-  progressFill.style.width = `${pct}%`;
-  progressThumb.style.left = `${pct}%`;
-  timeCurrent.textContent = formatTime(np.positionSecs);
+  currentDurationSecs = np.durationSecs;
+  if (!scrubbing) {
+    const pct = np.durationSecs > 0 ? (np.positionSecs / np.durationSecs) * 100 : 0;
+    progressFill.style.width = `${pct}%`;
+    progressThumb.style.left = `${pct}%`;
+    timeCurrent.textContent = formatTime(np.positionSecs);
+  }
   timeTotal.textContent = formatTime(np.durationSecs);
 
   updatePlayPauseIcon(np.status);
@@ -217,6 +442,22 @@ function updateUI(np: MonoEventNowPlaying): void {
     openLink.dataset.url = `https://monochrome.tf/track/t/${np.trackId}`;
   } else {
     openLink.style.display = 'none';
+  }
+
+  // Like button state
+  if (np.trackId) {
+    likeBtn.classList.toggle('hidden', false);
+    npDownloadBtn.classList.toggle('hidden', false);
+    const liked = (np as any).isLiked === true;
+    likeBtn.classList.toggle('liked', liked);
+    if (liked) likedSet.add(np.trackId);
+    else likedSet.delete(np.trackId);
+
+    const downloaded = (np as any).isDownloaded === true;
+    npDownloadBtn.classList.toggle('downloaded', downloaded);
+  } else {
+    likeBtn.classList.add('hidden');
+    npDownloadBtn.classList.add('hidden');
   }
 
   if (np.trackId && np.trackId !== currentTrackId) {
@@ -251,6 +492,9 @@ function updateBreadcrumbs(view: ViewName): void {
     trail.push({ label: 'Now Playing', view: 'now-playing' });
     trail.push({ label: 'Library', view: 'browse' });
     trail.push({ label: 'Research', current: true });
+  } else if (view === 'history') {
+    trail.push({ label: 'Now Playing', view: 'now-playing' });
+    trail.push({ label: 'History', current: true });
   }
 
   trail.forEach((crumb, i) => {
@@ -347,6 +591,14 @@ function navigateTo(view: ViewName): void {
       iconClear.classList.add('hidden');
       navAction.classList.add('hidden');
       break;
+    case 'history':
+      navBack.classList.remove('hidden');
+      navTitle.textContent = 'History';
+      iconList.classList.add('hidden');
+      iconPlayAll.classList.add('hidden');
+      iconClear.classList.add('hidden');
+      navAction.classList.add('hidden');
+      break;
   }
 }
 
@@ -383,6 +635,27 @@ async function loadPlaylists(): Promise<void> {
 function renderPlaylistList(playlists: MonoEventPlaylistInfo[]): void {
   browseList.innerHTML = '';
 
+  // Liked Songs virtual playlist
+  if (likedSet.size > 0) {
+    const likedRow = document.createElement('div');
+    likedRow.className = 'liked-songs-row';
+    likedRow.innerHTML = `
+      <div class="liked-songs-icon">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="white"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+      </div>
+      <div class="list-row-info">
+        <div class="list-row-title">Liked Songs</div>
+        <div class="list-row-sub">${likedSet.size} track${likedSet.size !== 1 ? 's' : ''}</div>
+      </div>
+    `;
+    likedRow.addEventListener('click', () => {
+      currentPlaylistName = 'Liked Songs';
+      navigateTo('detail');
+      loadLikedSongsDetail();
+    });
+    browseList.appendChild(likedRow);
+  }
+
   // New Playlist button at top
   const newRow = document.createElement('div');
   newRow.className = 'new-playlist-row';
@@ -403,6 +676,22 @@ function renderPlaylistList(playlists: MonoEventPlaylistInfo[]): void {
 }
 
 // --- Search ---
+const searchTabs = document.getElementById('search-tabs')!;
+
+function setSearchKind(kind: 'tracks' | 'albums' | 'artists'): void {
+  searchKind = kind;
+  searchTabs.querySelectorAll('.search-tab').forEach(tab => {
+    tab.classList.toggle('active', (tab as HTMLElement).dataset.kind === kind);
+  });
+  searchInput.placeholder = `Search ${kind}...`;
+  if (searchInput.value.trim()) performSearch(searchInput.value);
+}
+
+searchTabs.addEventListener('click', (e) => {
+  const tab = (e.target as HTMLElement).closest('.search-tab') as HTMLElement | null;
+  if (tab?.dataset.kind) setSearchKind(tab.dataset.kind as any);
+});
+
 function performSearch(query: string): void {
   if (activeSearchGen) {
     activeSearchGen.return(undefined);
@@ -410,6 +699,7 @@ function performSearch(query: string): void {
   }
 
   if (!query.trim()) {
+    searchTabs.classList.add('hidden');
     if (cachedPlaylists) {
       renderPlaylistList(cachedPlaylists);
     } else {
@@ -418,17 +708,18 @@ function performSearch(query: string): void {
     return;
   }
 
-  const q = query.toLowerCase();
+  searchTabs.classList.remove('hidden');
 
+  const q = query.toLowerCase();
   const matchingPlaylists = (cachedPlaylists || []).filter(
     pl => pl.name.toLowerCase().includes(q)
   );
 
-  const gen = mono.search(query, 'tracks', 8);
+  const gen = mono.search(query, searchKind, 12);
   activeSearchGen = gen;
 
   browseList.innerHTML = '';
-  if (matchingPlaylists.length > 0) {
+  if (matchingPlaylists.length > 0 && searchKind === 'tracks') {
     const header = document.createElement('div');
     header.className = 'list-empty';
     header.textContent = 'Playlists';
@@ -440,18 +731,24 @@ function performSearch(query: string): void {
   }
 
   (async () => {
-    const results: MonoEventSearchTrack[] = [];
+    const results: MonoEvent[] = [];
     try {
       for await (const event of gen) {
-        if (event.type === 'search_track') {
-          results.push(event as MonoEventSearchTrack);
+        if (event.type === 'search_track' || event.type === 'search_album' || event.type === 'search_artist') {
+          results.push(event);
         }
       }
     } catch {
       // Search cancelled or failed
     }
     if (activeSearchGen === gen) {
-      renderSearchResults(results, matchingPlaylists.length > 0);
+      if (searchKind === 'tracks') {
+        renderSearchResults(results as MonoEventSearchTrack[], matchingPlaylists.length > 0);
+      } else if (searchKind === 'albums') {
+        renderAlbumResults(results as MonoEventSearchAlbum[]);
+      } else {
+        renderArtistResults(results as MonoEventSearchArtist[]);
+      }
       activeSearchGen = null;
     }
   })();
@@ -475,7 +772,12 @@ function makePlaylistRow(pl: MonoEventPlaylistInfo): HTMLElement {
 
   const sub = document.createElement('div');
   sub.className = 'list-row-sub';
-  sub.textContent = `${pl.trackCount} track${pl.trackCount !== 1 ? 's' : ''}`;
+  const trackLabel = `${pl.trackCount} track${pl.trackCount !== 1 ? 's' : ''}`;
+  if (pl.description) {
+    sub.innerHTML = `<span class="ai-badge">AI</span> ${trackLabel}`;
+  } else {
+    sub.textContent = trackLabel;
+  }
 
   info.appendChild(titleSpan);
   info.appendChild(sub);
@@ -532,9 +834,7 @@ function renderSearchResults(results: MonoEventSearchTrack[], hasPlaylistSection
     titleSpan.className = 'list-row-title';
     titleSpan.textContent = track.title;
 
-    const sub = document.createElement('div');
-    sub.className = 'list-row-sub';
-    sub.textContent = `${track.artist} · ${formatTime(track.durationSecs)}`;
+    const sub = makeTrackSub(track.artist, { album: track.album, durationSecs: track.durationSecs, trackId: track.id });
 
     info.appendChild(titleSpan);
     info.appendChild(sub);
@@ -574,7 +874,284 @@ function renderSearchResults(results: MonoEventSearchTrack[], hasPlaylistSection
     row.appendChild(playBtn);
     row.appendChild(addBtn);
     row.appendChild(plBtn);
+    row.appendChild(makeDownloadBtn(track.id));
     browseList.appendChild(row);
+  }
+}
+
+function renderAlbumResults(results: MonoEventSearchAlbum[]): void {
+  browseList.innerHTML = '';
+  if (results.length === 0) {
+    const emptyEl = document.createElement('div');
+    emptyEl.className = 'list-empty';
+    emptyEl.textContent = 'No albums found';
+    browseList.appendChild(emptyEl);
+    return;
+  }
+  for (const album of results) {
+    const row = document.createElement('div');
+    row.className = 'list-row';
+    row.addEventListener('click', () => {
+      currentPlaylistName = album.title;
+      navigateTo('detail');
+      loadAlbumDetail(album.id);
+    });
+
+    const info = document.createElement('div');
+    info.className = 'list-row-info';
+
+    const titleSpan = document.createElement('div');
+    titleSpan.className = 'list-row-title';
+    titleSpan.textContent = album.title;
+
+    const sub = document.createElement('div');
+    sub.className = 'list-row-sub';
+    const parts = [album.artist, `${album.trackCount} tracks`];
+    if (album.releaseDate) parts.push(album.releaseDate.slice(0, 4));
+    sub.textContent = parts.join(' · ');
+
+    info.appendChild(titleSpan);
+    info.appendChild(sub);
+
+    const chevron = document.createElement('span');
+    chevron.className = 'list-row-chevron';
+    chevron.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>';
+
+    row.appendChild(makeAlbumCoverThumb(album.id));
+    row.appendChild(info);
+    row.appendChild(chevron);
+    browseList.appendChild(row);
+  }
+}
+
+function renderArtistResults(results: MonoEventSearchArtist[]): void {
+  browseList.innerHTML = '';
+  if (results.length === 0) {
+    const emptyEl = document.createElement('div');
+    emptyEl.className = 'list-empty';
+    emptyEl.textContent = 'No artists found';
+    browseList.appendChild(emptyEl);
+    return;
+  }
+  for (const artist of results) {
+    const row = document.createElement('div');
+    row.className = 'list-row';
+    row.addEventListener('click', () => {
+      currentPlaylistName = artist.name;
+      navigateTo('detail');
+      loadArtistAlbums(artist.id, artist.name);
+    });
+
+    const info = document.createElement('div');
+    info.className = 'list-row-info';
+
+    const titleSpan = document.createElement('div');
+    titleSpan.className = 'list-row-title';
+    titleSpan.textContent = artist.name;
+
+    info.appendChild(titleSpan);
+
+    const chevron = document.createElement('span');
+    chevron.className = 'list-row-chevron';
+    chevron.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>';
+
+    row.appendChild(info);
+    row.appendChild(chevron);
+    browseList.appendChild(row);
+  }
+}
+
+// --- Album detail (reuses detail view) ---
+async function loadAlbumDetail(albumId: number): Promise<void> {
+  currentDetailAlbumId = albumId;
+  detailTracks.innerHTML = '';
+  detailSubheader.textContent = 'Loading...';
+  detailCover.classList.remove('loaded');
+  detailCover.classList.add('loading');
+  detailCover.style.display = 'flex';
+
+  try {
+    let albumInfo: MonoEventAlbum | null = null;
+    const tracks: MonoEventAlbumTrack[] = [];
+    for await (const event of mono.album(albumId)) {
+      if (event.type === 'album') albumInfo = event as MonoEventAlbum;
+      if (event.type === 'album_track') tracks.push(event as MonoEventAlbumTrack);
+    }
+
+    // Load cover art from first track (mono.cover needs track IDs, not album IDs)
+    if (tracks.length > 0) {
+      (async () => {
+        try {
+          for await (const event of mono.cover(tracks[0].id, 640)) {
+            if (event.type === 'cover') {
+              detailCoverImg.src = (event as MonoEventCover).url;
+              detailCoverImg.onload = () => {
+                detailCover.classList.remove('loading');
+                detailCover.classList.add('loaded');
+              };
+              return;
+            }
+          }
+        } catch { /* no cover */ }
+        detailCover.classList.remove('loading');
+        detailCover.style.display = 'none';
+      })();
+    } else {
+      detailCover.classList.remove('loading');
+      detailCover.style.display = 'none';
+    }
+
+    if (albumInfo) {
+      currentPlaylistName = albumInfo.title;
+      navTitle.textContent = albumInfo.title;
+      const parts = [albumInfo.artist, `${tracks.length} tracks`];
+      if (albumInfo.releaseDate) parts.push(albumInfo.releaseDate.slice(0, 4));
+      detailSubheader.textContent = parts.join(' · ');
+    } else {
+      detailSubheader.textContent = `${tracks.length} tracks`;
+    }
+
+    detailTracks.innerHTML = '';
+
+    // Download all button
+    if (tracks.length > 0) {
+      const dlAllBtn = document.createElement('button');
+      dlAllBtn.className = 'save-queue-btn';
+      dlAllBtn.innerHTML = downloadIcon + ' Download Album';
+      dlAllBtn.addEventListener('click', async () => {
+        dlAllBtn.textContent = 'Downloading...';
+        dlAllBtn.classList.add('downloading');
+        for (const t of tracks) {
+          try {
+            for await (const ev of mono.download(t.id, DOWNLOAD_DIR)) {
+              if (ev.type === 'download_complete') break;
+            }
+          } catch { /* continue with next track */ }
+        }
+        dlAllBtn.innerHTML = checkIcon + ' Downloaded';
+        dlAllBtn.classList.remove('downloading');
+        setTimeout(() => { dlAllBtn.innerHTML = downloadIcon + ' Download Album'; }, 3000);
+      });
+      detailTracks.appendChild(dlAllBtn);
+    }
+
+    for (const track of tracks) {
+      const row = document.createElement('div');
+      row.className = 'list-row';
+      row.addEventListener('click', () => {
+        rpcFire(player.play(track.id));
+        navigateTo('now-playing');
+      });
+
+      const info = document.createElement('div');
+      info.className = 'list-row-info';
+
+      const titleSpan = document.createElement('div');
+      titleSpan.className = 'list-row-title';
+      titleSpan.textContent = `${track.position}. ${track.title}`;
+
+      const sub = makeTrackSub(track.artist, { durationSecs: track.durationSecs });
+
+      info.appendChild(titleSpan);
+      info.appendChild(sub);
+
+      // Queue button
+      const queueBtn = document.createElement('button');
+      queueBtn.className = 'row-action';
+      queueBtn.title = 'Add to queue';
+      queueBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>';
+      queueBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        rpcFire(player.queueAdd(track.id));
+      });
+
+      row.appendChild(info);
+      row.appendChild(queueBtn);
+      row.appendChild(makeDownloadBtn(track.id));
+      detailTracks.appendChild(row);
+    }
+  } catch {
+    detailSubheader.textContent = '';
+    detailTracks.innerHTML = '';
+    const errEl = document.createElement('div');
+    errEl.className = 'list-empty';
+    errEl.textContent = 'Failed to load album';
+    detailTracks.appendChild(errEl);
+  }
+}
+
+// --- Artist albums (reuses detail view) ---
+async function loadArtistAlbums(artistId: number, artistName: string): Promise<void> {
+  currentDetailAlbumId = null;
+  detailTracks.innerHTML = '';
+  detailSubheader.textContent = 'Loading...';
+  detailCover.classList.remove('loaded');
+  navTitle.textContent = artistName;
+
+  try {
+    // Search for albums by this artist
+    const albums: MonoEventSearchAlbum[] = [];
+    for await (const event of mono.search(artistName, 'albums', 20)) {
+      if (event.type === 'search_album') {
+        const album = event as MonoEventSearchAlbum;
+        // Filter to only this artist's albums
+        if (album.artist.toLowerCase() === artistName.toLowerCase()) {
+          albums.push(album);
+        }
+      }
+    }
+
+    detailSubheader.textContent = `${albums.length} album${albums.length !== 1 ? 's' : ''}`;
+    detailTracks.innerHTML = '';
+
+    if (albums.length === 0) {
+      const emptyEl = document.createElement('div');
+      emptyEl.className = 'list-empty';
+      emptyEl.textContent = 'No albums found';
+      detailTracks.appendChild(emptyEl);
+      return;
+    }
+
+    for (const album of albums) {
+      const row = document.createElement('div');
+      row.className = 'list-row';
+      row.addEventListener('click', () => {
+        currentPlaylistName = album.title;
+        loadAlbumDetail(album.id);
+      });
+
+      const info = document.createElement('div');
+      info.className = 'list-row-info';
+
+      const titleSpan = document.createElement('div');
+      titleSpan.className = 'list-row-title';
+      titleSpan.textContent = album.title;
+
+      const sub = document.createElement('div');
+      sub.className = 'list-row-sub';
+      const parts = [`${album.trackCount} tracks`];
+      if (album.releaseDate) parts.push(album.releaseDate.slice(0, 4));
+      sub.textContent = parts.join(' · ');
+
+      info.appendChild(titleSpan);
+      info.appendChild(sub);
+
+      const chevron = document.createElement('span');
+      chevron.className = 'list-row-chevron';
+      chevron.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>';
+
+      row.appendChild(makeAlbumCoverThumb(album.id));
+      row.appendChild(info);
+      row.appendChild(chevron);
+      detailTracks.appendChild(row);
+    }
+  } catch {
+    detailSubheader.textContent = '';
+    detailTracks.innerHTML = '';
+    const errEl = document.createElement('div');
+    errEl.className = 'list-empty';
+    errEl.textContent = 'Failed to load artist';
+    detailTracks.appendChild(errEl);
   }
 }
 
@@ -587,8 +1164,10 @@ searchInput.addEventListener('input', () => {
 
 // --- Playlist detail ---
 async function loadPlaylistDetail(name: string): Promise<void> {
+  currentDetailAlbumId = null;
   detailTracks.innerHTML = '';
   detailSubheader.textContent = 'Loading...';
+  detailCover.classList.remove('loaded');
 
   try {
     let tracks: QueuedTrack[] = [];
@@ -597,7 +1176,6 @@ async function loadPlaylistDetail(name: string): Promise<void> {
         tracks = (event as MonoEventQueue).tracks;
       }
     }
-
     detailSubheader.textContent = `${tracks.length} track${tracks.length !== 1 ? 's' : ''}`;
     detailTracks.innerHTML = '';
 
@@ -617,9 +1195,7 @@ async function loadPlaylistDetail(name: string): Promise<void> {
       titleSpan.className = 'list-row-title';
       titleSpan.textContent = track.title;
 
-      const sub = document.createElement('div');
-      sub.className = 'list-row-sub';
-      sub.textContent = `${track.artist} · ${formatTime(track.durationSecs)}`;
+      const sub = makeTrackSub(track.artist, { album: track.album, durationSecs: track.durationSecs, trackId: track.id });
 
       // Remove from playlist button
       const removeBtn = document.createElement('button');
@@ -639,6 +1215,7 @@ async function loadPlaylistDetail(name: string): Promise<void> {
       info.appendChild(titleSpan);
       info.appendChild(sub);
       row.appendChild(info);
+      row.appendChild(makeDownloadBtn(track.id));
       row.appendChild(removeBtn);
       detailTracks.appendChild(row);
     }
@@ -648,6 +1225,78 @@ async function loadPlaylistDetail(name: string): Promise<void> {
     const errEl = document.createElement('div');
     errEl.className = 'list-empty';
     errEl.textContent = 'Failed to load playlist';
+    detailTracks.appendChild(errEl);
+  }
+}
+
+// --- Liked Songs detail ---
+async function loadLikedSongsDetail(): Promise<void> {
+  currentDetailAlbumId = null;
+  detailTracks.innerHTML = '';
+  detailSubheader.textContent = 'Loading...';
+  detailCover.classList.remove('loaded');
+  detailCover.style.display = 'none';
+
+  try {
+    let ids: number[] = [];
+    for await (const event of player.likedTracks()) {
+      if (event.type === 'queue') {
+        ids = (event as MonoEventQueue).tracks.map(t => t.id);
+      }
+    }
+    if (ids.length === 0) {
+      detailSubheader.textContent = 'No liked songs';
+      return;
+    }
+    detailSubheader.textContent = `${ids.length} track${ids.length !== 1 ? 's' : ''}`;
+
+    // Resolve track metadata via search (best effort)
+    for (const id of ids) {
+      try {
+        let trackEvent: any = null;
+        for await (const event of mono.track(id)) {
+          if (event.type === 'track') { trackEvent = event; break; }
+        }
+        if (!trackEvent) continue;
+        const row = document.createElement('div');
+        row.className = 'list-row';
+        row.addEventListener('click', () => {
+          rpcFire(player.play(id));
+          navigateTo('now-playing');
+        });
+        const info = document.createElement('div');
+        info.className = 'list-row-info';
+        const titleSpan = document.createElement('div');
+        titleSpan.className = 'list-row-title';
+        titleSpan.textContent = trackEvent.title;
+        const sub = makeTrackSub(trackEvent.artist, { album: trackEvent.album, durationSecs: trackEvent.durationSecs, trackId: id });
+        info.appendChild(titleSpan);
+        info.appendChild(sub);
+
+        // Unlike button
+        const unlikeBtn = document.createElement('button');
+        unlikeBtn.className = 'row-action';
+        unlikeBtn.title = 'Unlike';
+        unlikeBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="#e74c3c"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>';
+        unlikeBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          rpcFire(player.like(id));
+          likedSet.delete(id);
+          row.remove();
+        });
+
+        row.appendChild(info);
+        row.appendChild(makeDownloadBtn(id));
+        row.appendChild(unlikeBtn);
+        detailTracks.appendChild(row);
+      } catch { /* skip this track */ }
+    }
+  } catch {
+    detailSubheader.textContent = '';
+    detailTracks.innerHTML = '';
+    const errEl = document.createElement('div');
+    errEl.className = 'list-empty';
+    errEl.textContent = 'Failed to load liked songs';
     detailTracks.appendChild(errEl);
   }
 }
@@ -699,9 +1348,13 @@ async function loadQueue(): Promise<void> {
       titleSpan.className = 'list-row-title';
       titleSpan.textContent = track.title;
 
-      const sub = document.createElement('div');
-      sub.className = 'list-row-sub';
-      sub.textContent = `${track.artist} · ${formatTime(track.durationSecs)}`;
+      const sub = makeTrackSub(track.artist, { album: track.album, durationSecs: track.durationSecs, trackId: track.id });
+      if (track.source) {
+        const fromSpan = document.createElement('span');
+        fromSpan.className = 'queue-source';
+        fromSpan.textContent = ` · ${track.source}`;
+        sub.appendChild(fromSpan);
+      }
 
       info.appendChild(titleSpan);
       info.appendChild(sub);
@@ -744,6 +1397,8 @@ navBack.addEventListener('click', () => {
     navigateTo('now-playing');
   } else if (currentView === 'research') {
     navigateTo('browse');
+  } else if (currentView === 'history') {
+    navigateTo('now-playing');
   }
 });
 
@@ -751,6 +1406,9 @@ navAction.addEventListener('click', () => {
   if (currentView === 'now-playing') {
     navigateTo('browse');
     loadPlaylists();
+  } else if (currentView === 'detail' && currentDetailAlbumId) {
+    rpcFire(player.queueAlbum(currentDetailAlbumId));
+    navigateTo('now-playing');
   } else if (currentView === 'detail' && currentPlaylistName) {
     rpcFire(playlist.play(currentPlaylistName));
     navigateTo('now-playing');
@@ -800,6 +1458,41 @@ volumeSlider.addEventListener('input', () => {
       for await (const _ of player.volume(level)) { break; }
     } catch { /* ignore */ }
   }, 50);
+});
+
+// Progress bar scrubbing
+const progressBar = document.getElementById('progress-bar')!;
+let scrubbing = false;
+
+function scrubTo(e: MouseEvent | PointerEvent): void {
+  const rect = progressBar.getBoundingClientRect();
+  const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  progressFill.style.width = `${pct * 100}%`;
+  progressThumb.style.left = `${pct * 100}%`;
+  timeCurrent.textContent = formatTime(pct * currentDurationSecs);
+}
+
+progressBar.addEventListener('pointerdown', (e) => {
+  if (currentDurationSecs <= 0) return;
+  scrubbing = true;
+  progressFill.style.transition = 'none';
+  progressBar.setPointerCapture(e.pointerId);
+  scrubTo(e);
+});
+
+progressBar.addEventListener('pointermove', (e) => {
+  if (!scrubbing) return;
+  scrubTo(e);
+});
+
+progressBar.addEventListener('pointerup', (e) => {
+  if (!scrubbing) return;
+  scrubbing = false;
+  progressFill.style.transition = '';
+  const rect = progressBar.getBoundingClientRect();
+  const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  const seekPos = pct * currentDurationSecs;
+  rpcFire(player.seek(seekPos));
 });
 
 // Open on Monochrome
@@ -887,60 +1580,282 @@ interface ResearchTrack {
   reason: string;
 }
 
+const RESEARCH_SESSION = 'mono-tray-research';
+const MAX_RESEARCH_ATTEMPTS = 3;
+
+function setResearchStatus(text: string, isError = false): void {
+  researchStatus.textContent = text;
+  researchStatus.classList.toggle('error', isError);
+  researchStatus.classList.toggle('hidden', !text);
+}
+
+async function ensureClaudeSession(): Promise<void> {
+  if (claudeSessionReady) return;
+  await substrateRpc.connect();
+  try {
+    await claudecode.create('sonnet', RESEARCH_SESSION, '/tmp', false,
+      `You are a music researcher and playlist curator. You have access to WebSearch to research music themes, genres, artists, and tracks.
+
+When asked to research a theme, use WebSearch to find artists, albums, and tracks that match. Then return a JSON object with search terms for finding those in a music catalog.
+
+When asked to curate from found tracks, pick the best ones, order them for the intended thematic arc, and explain each choice.
+
+You MUST respond with ONLY valid JSON — no markdown fences, no explanation text, no preamble.`);
+    claudeSessionReady = true;
+  } catch {
+    // Session already exists — that's fine
+    claudeSessionReady = true;
+  }
+}
+
+function parseResearchJson(text: string): { name: string; tracks: ResearchTrack[] } | null {
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) return null;
+
+  try {
+    const parsed = JSON.parse(jsonMatch[0]);
+    if (typeof parsed.name !== 'string' || !Array.isArray(parsed.tracks)) return null;
+    const tracks: ResearchTrack[] = parsed.tracks
+      .filter((t: any) => typeof t.id === 'number' && typeof t.title === 'string')
+      .map((t: any) => ({
+        id: t.id,
+        title: t.title,
+        artist: t.artist || 'Unknown',
+        reason: t.reason || '',
+      }));
+    if (tracks.length === 0) return null;
+    return { name: parsed.name, tracks };
+  } catch {
+    return null;
+  }
+}
+
+function parseSearchSuggestions(text: string): string[] | null {
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) return null;
+
+  try {
+    const parsed = JSON.parse(jsonMatch[0]);
+    if (Array.isArray(parsed.searches) && parsed.searches.length > 0) {
+      return parsed.searches.filter((s: any) => typeof s === 'string');
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function askClaude(prompt: string, allowedTools?: string[], onToolUse?: (toolName: string) => void): Promise<string> {
+  let fullResponse = '';
+  for await (const event of claudecode.chat(RESEARCH_SESSION, prompt, null, allowedTools)) {
+    if (event.type === 'content') {
+      fullResponse += event.text;
+    } else if (event.type === 'tool_use' && onToolUse) {
+      onToolUse(event.toolName);
+    } else if (event.type === 'error') {
+      throw new Error(event.message);
+    }
+  }
+  return fullResponse;
+}
+
 async function researchPlaylist(query: string): Promise<void> {
   if (isResearching) return;
   isResearching = true;
   sparkleBtn.classList.add('researching');
+  researchResult = null;
 
   try {
-    // 1. Search monochrome for tracks matching the query
-    const searchResults: MonoEventSearchTrack[] = [];
-    for await (const event of mono.search(query, 'tracks', 50)) {
-      if (event.type === 'search_track') searchResults.push(event as MonoEventSearchTrack);
+    await ensureClaudeSession();
+
+    // ── Phase 1: AI Research via WebSearch ──
+    setResearchStatus('Researching theme...');
+
+    const researchPrompt = `Research this music theme/query and suggest specific search terms I can use to find matching tracks in a music catalog (Tidal).
+
+Theme: "${query}"
+
+Use WebSearch to find artists, albums, and tracks that match this theme. Look for:
+- Artists known for this style/theme
+- Specific albums or tracks that embody it
+- Related genres and subgenres
+
+Then return ONLY this JSON (no other text):
+{"searches": ["artist name", "album title", "track title - artist", ...]}
+
+Return 10-20 specific, varied search terms. Mix artist names, album titles, and "track - artist" pairs. Focus on terms that will actually find results in a streaming catalog.`;
+
+    let searchSuggestions: string[] | null = null;
+
+    try {
+      let webSearchCount = 0;
+      const researchResponse = await askClaude(researchPrompt, ['WebSearch'], (toolName) => {
+        if (toolName === 'WebSearch') {
+          webSearchCount++;
+          setResearchStatus(webSearchCount === 1
+            ? 'Searching the web...'
+            : `Searching the web (${webSearchCount})...`);
+        }
+      });
+      searchSuggestions = parseSearchSuggestions(researchResponse);
+    } catch (err) {
+      console.warn('Phase 1 research failed, falling back to direct search:', err);
     }
 
-    if (searchResults.length === 0) {
+    // ── Phase 2: Search Tidal ──
+    let allTracks: MonoEventSearchTrack[] = [];
+    const seenTrackIds = new Set<number>();
+
+    if (searchSuggestions && searchSuggestions.length > 0) {
+      // AI-guided search: search for each suggestion in parallel
+      const totalSearches = searchSuggestions.length;
+      let completedSearches = 0;
+
+      const searchPromises = searchSuggestions.map(async (term) => {
+        const tracks: MonoEventSearchTrack[] = [];
+        try {
+          for await (const event of mono.search(term, 'tracks', 10)) {
+            if (event.type === 'search_track') tracks.push(event as MonoEventSearchTrack);
+          }
+          // Also search albums for broader coverage
+          for await (const event of mono.search(term, 'albums', 5)) {
+            if (event.type === 'search_album') {
+              // Search for tracks within found albums by album name + artist
+              const album = event as MonoEventSearchAlbum;
+              for await (const trackEvent of mono.search(`${album.title} ${album.artist}`, 'tracks', 5)) {
+                if (trackEvent.type === 'search_track') tracks.push(trackEvent as MonoEventSearchTrack);
+              }
+            }
+          }
+        } catch {
+          // Individual search failures are fine
+        }
+        completedSearches++;
+        setResearchStatus(`Searching library (${completedSearches}/${totalSearches})...`);
+        return tracks;
+      });
+
+      const results = await Promise.all(searchPromises);
+      for (const tracks of results) {
+        for (const track of tracks) {
+          if (!seenTrackIds.has(track.id)) {
+            seenTrackIds.add(track.id);
+            allTracks.push(track);
+          }
+        }
+      }
+    }
+
+    // Fallback: if AI research found nothing (or was skipped), do direct search
+    if (allTracks.length === 0) {
+      setResearchStatus('Searching tracks...');
+      for await (const event of mono.search(query, 'tracks', 50)) {
+        if (event.type === 'search_track') {
+          const track = event as MonoEventSearchTrack;
+          if (!seenTrackIds.has(track.id)) {
+            seenTrackIds.add(track.id);
+            allTracks.push(track);
+          }
+        }
+      }
+    }
+
+    if (allTracks.length === 0) {
+      setResearchStatus('No tracks found', true);
+      setTimeout(() => setResearchStatus(''), 3000);
       isResearching = false;
       sparkleBtn.classList.remove('researching');
       return;
     }
 
-    // 2. Send to Claude via substrate claudecode for curation
-    const trackList = searchResults.map(t => ({ id: t.id, title: t.title, artist: t.artist, album: t.album }));
-    const chatPrompt = `Given these tracks from a music search for "${query}", curate a playlist. Select the best tracks that fit together, explain why each fits, and suggest a playlist name. Return ONLY valid JSON, no markdown: {"name": "...", "tracks": [{"id": N, "title": "...", "artist": "...", "reason": "..."}]}
+    // ── Phase 3: Curate with Claude ──
+    setResearchStatus(`Found ${allTracks.length} tracks, curating...`);
 
-Available tracks: ${JSON.stringify(trackList)}`;
+    const trackList = allTracks.map(t => ({
+      id: t.id, title: t.title, artist: t.artist, album: t.album
+    }));
 
-    await substrateRpc.connect();
+    const curatePrompt = `Here are the tracks I found in our music library for the theme: "${query}"
 
-    // Ensure session exists (create if needed, ignore error if already exists)
-    try {
-      await claudecode.create('haiku', 'mono-tray-research', '.', false, 'You are a music curator. Return only valid JSON, no markdown fences.');
-    } catch { /* session may already exist */ }
+Curate a playlist from these results. Pick the best tracks that fit the theme, order them to create a meaningful arc or journey, and explain each choice thematically.
 
-    let fullResponse = '';
-    for await (const event of claudecode.chat('mono-tray-research', chatPrompt)) {
-      if (event.type === 'content') fullResponse += event.text;
+Respond with ONLY this JSON (no other text):
+{"name": "playlist name", "tracks": [{"id": 123, "title": "...", "artist": "...", "reason": "why this track fits the theme"}]}
+
+Available tracks (${trackList.length} total):
+${JSON.stringify(trackList)}`;
+
+    let result: { name: string; tracks: ResearchTrack[] } | null = null;
+
+    for (let attempt = 1; attempt <= MAX_RESEARCH_ATTEMPTS; attempt++) {
+      setResearchStatus(attempt === 1
+        ? `Found ${allTracks.length} tracks, curating...`
+        : `Retrying (${attempt}/${MAX_RESEARCH_ATTEMPTS})...`);
+
+      try {
+        const prompt = attempt === 1
+          ? curatePrompt
+          : `Your previous response was not valid JSON. Please try again. Respond with ONLY a JSON object, nothing else:\n\n${curatePrompt}`;
+
+        const response = await askClaude(prompt);
+        result = parseResearchJson(response);
+
+        if (result) break;
+
+        console.warn(`Curation attempt ${attempt}: failed to parse JSON from response`);
+      } catch (err) {
+        console.error(`Curation attempt ${attempt} error:`, err);
+        if (attempt === MAX_RESEARCH_ATTEMPTS) {
+          setResearchStatus('Claude error — try again later', true);
+          setTimeout(() => setResearchStatus(''), 5000);
+        }
+      }
     }
 
-    // 3. Parse JSON from response
-    const jsonMatch = fullResponse.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      researchResult = JSON.parse(jsonMatch[0]);
+    if (result) {
+      researchResult = result;
+
+      // Auto-save: create playlist with Claude's reasoning as description
+      const description = result.tracks
+        .map(t => `${t.title} — ${t.artist}: ${t.reason}`)
+        .join('\n');
+      const trackIds = result.tracks.map(t => t.id);
+      setResearchStatus('Saving playlist...');
+      await rpcFire(playlist.create(result.name, description, trackIds));
+      cachedPlaylists = null; // invalidate cache so list refreshes
+
+      // Save research data (search suggestions + all found tracks before curation)
+      const researchData = {
+        query,
+        searchSuggestions,
+        allFoundTracks: allTracks.map(t => ({ id: t.id, title: t.title, artist: t.artist, album: t.album })),
+        curatedTracks: result.tracks,
+        createdAt: new Date().toISOString(),
+      };
+      rpcFire(playlist.researchSave(result.name, researchData));
+
+      setResearchStatus('');
+      // Auto-show the research results view
+      showResearchResults();
+
+      if (notificationsEnabled) {
+        sendNotification({
+          title: 'Playlist Research',
+          body: `Saved: ${result.name} (${result.tracks.length} tracks)`
+        });
+      }
+    } else if (!researchResult) {
+      setResearchStatus('Could not parse results — try a different query', true);
+      setTimeout(() => setResearchStatus(''), 5000);
     }
   } catch (err) {
     console.error('Research failed:', err);
+    setResearchStatus('Research failed — check substrate connection', true);
+    setTimeout(() => setResearchStatus(''), 5000);
   }
 
   isResearching = false;
   sparkleBtn.classList.remove('researching');
-
-  if (researchResult) {
-    sparkleBadge.classList.remove('hidden');
-    if (notificationsEnabled) {
-      sendNotification({ title: 'Playlist Research', body: `Ready: ${researchResult.name}` });
-    }
-  }
 }
 
 function showResearchResults(): void {
@@ -960,9 +1875,7 @@ function showResearchResults(): void {
     titleSpan.className = 'list-row-title';
     titleSpan.textContent = track.title;
 
-    const sub = document.createElement('div');
-    sub.className = 'list-row-sub';
-    sub.textContent = track.artist;
+    const sub = makeTrackSub(track.artist);
 
     const reason = document.createElement('div');
     reason.className = 'research-reason';
@@ -989,7 +1902,7 @@ function showResearchResults(): void {
     queueAddBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>';
     queueAddBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      rpcFire(player.queueAdd(track.id));
+      rpcFire(player.queueAdd(track.id, null, researchResult?.name));
     });
 
     // Remove button
@@ -1008,6 +1921,7 @@ function showResearchResults(): void {
     row.appendChild(info);
     row.appendChild(playBtn);
     row.appendChild(queueAddBtn);
+    row.appendChild(makeDownloadBtn(track.id));
     row.appendChild(removeBtn);
     researchTracksEl.appendChild(row);
   }
@@ -1015,13 +1929,14 @@ function showResearchResults(): void {
   navigateTo('research');
 }
 
-// Research view buttons
+// Research view buttons — playlist is auto-saved, this renames if user edited the name
 researchCreateBtn.addEventListener('click', () => {
   if (!researchResult) return;
-  const name = researchNameInput.value.trim() || researchResult.name;
-  const trackIds = researchResult.tracks.map(t => t.id);
-  rpcFire(playlist.create(name, null, trackIds));
-  cachedPlaylists = null;
+  const newName = researchNameInput.value.trim();
+  if (newName && newName !== researchResult.name) {
+    rpcFire(playlist.rename(researchResult.name, newName));
+    cachedPlaylists = null;
+  }
   researchResult = null;
   navigateTo('browse');
   loadPlaylists();
@@ -1030,7 +1945,7 @@ researchCreateBtn.addEventListener('click', () => {
 researchQueueBtn.addEventListener('click', () => {
   if (!researchResult) return;
   for (const track of researchResult.tracks) {
-    rpcFire(player.queueAdd(track.id));
+    rpcFire(player.queueAdd(track.id, null, researchResult.name));
   }
 });
 
@@ -1058,12 +1973,153 @@ searchInput.addEventListener('keydown', (e) => {
   }
 });
 
+// --- Like button ---
+likeBtn.addEventListener('click', () => {
+  if (!currentTrackId) return;
+  const wasLiked = likeBtn.classList.contains('liked');
+  likeBtn.classList.toggle('liked');
+  if (wasLiked) likedSet.delete(currentTrackId);
+  else likedSet.add(currentTrackId);
+  likeBtn.classList.remove('like-animate');
+  void likeBtn.offsetWidth; // reflow to restart animation
+  likeBtn.classList.add('like-animate');
+  rpcFire(player.like(currentTrackId));
+});
+likeBtn.addEventListener('animationend', () => likeBtn.classList.remove('like-animate'));
+
+// --- Download button (now-playing) — toggles download/delete/cancel ---
+let activeDownload: AsyncGenerator<any> | null = null;
+
+npDownloadBtn.addEventListener('click', async () => {
+  if (!currentTrackId) return;
+  if (npDownloadBtn.classList.contains('downloading') && activeDownload) {
+    // Cancel in-progress download
+    activeDownload.return(undefined);
+    activeDownload = null;
+    npDownloadBtn.classList.remove('downloading');
+    npDownloadBtn.innerHTML = downloadIcon;
+    rpcFire(player.deleteDownload(currentTrackId));
+    return;
+  }
+  if (npDownloadBtn.classList.contains('downloaded')) {
+    // Delete local file
+    npDownloadBtn.classList.remove('downloaded');
+    npDownloadBtn.innerHTML = downloadIcon;
+    rpcFire(player.deleteDownload(currentTrackId));
+  } else {
+    // Download with progress ring
+    const circumference = 2 * Math.PI * 10; // r=10
+    npDownloadBtn.classList.add('downloading');
+    npDownloadBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="none" stroke="var(--text-secondary)" stroke-width="2" opacity="0.2"/><circle class="dl-ring" cx="12" cy="12" r="10" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-dasharray="${circumference}" stroke-dashoffset="${circumference}" transform="rotate(-90 12 12)"/></svg>`;
+    const ring = npDownloadBtn.querySelector('.dl-ring') as SVGCircleElement | null;
+    const gen = player.downloadTrack(currentTrackId);
+    activeDownload = gen;
+    try {
+      for await (const event of gen) {
+        if (activeDownload !== gen) return; // cancelled
+        if (event.type === 'download_progress' && ring) {
+          const pct = (event as any).percent ?? 0;
+          ring.style.strokeDashoffset = String(circumference * (1 - pct / 100));
+        } else if (event.type === 'download_complete') {
+          activeDownload = null;
+          npDownloadBtn.classList.remove('downloading');
+          npDownloadBtn.classList.add('downloaded');
+          npDownloadBtn.innerHTML = checkIcon;
+          return;
+        }
+      }
+    } catch {
+      npDownloadBtn.classList.remove('downloading');
+      npDownloadBtn.innerHTML = downloadIcon;
+    }
+    activeDownload = null;
+  }
+});
+
+// --- History button + view ---
+historyBtn.addEventListener('click', () => {
+  navigateTo('history');
+  loadHistory();
+});
+
+async function loadHistory(): Promise<void> {
+  historyTracksEl.innerHTML = '';
+  historySubheader.textContent = 'Loading...';
+  try {
+    let tracks: QueuedTrack[] = [];
+    for await (const event of player.historyList()) {
+      if (event.type === 'queue') {
+        tracks = (event as MonoEventQueue).tracks;
+      }
+    }
+    // Reverse: most recent first
+    tracks = tracks.slice().reverse();
+    historySubheader.textContent = tracks.length > 0
+      ? `${tracks.length} track${tracks.length !== 1 ? 's' : ''}`
+      : '';
+    historyTracksEl.innerHTML = '';
+    if (tracks.length === 0) {
+      const emptyEl = document.createElement('div');
+      emptyEl.className = 'list-empty';
+      emptyEl.textContent = 'No history yet';
+      historyTracksEl.appendChild(emptyEl);
+      return;
+    }
+    for (const track of tracks) {
+      const row = document.createElement('div');
+      row.className = 'list-row';
+      row.addEventListener('click', () => {
+        rpcFire(player.play(track.id));
+        navigateTo('now-playing');
+      });
+      const info = document.createElement('div');
+      info.className = 'list-row-info';
+      const titleSpan = document.createElement('div');
+      titleSpan.className = 'list-row-title';
+      titleSpan.textContent = track.title;
+      const sub = makeTrackSub(track.artist, { album: track.album, durationSecs: track.durationSecs, trackId: track.id });
+      info.appendChild(titleSpan);
+      info.appendChild(sub);
+      // Like indicator
+      if (likedSet.has(track.id)) {
+        const heart = document.createElement('span');
+        heart.className = 'like-indicator';
+        heart.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="#e74c3c"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>';
+        row.appendChild(heart);
+      }
+      row.appendChild(info);
+      historyTracksEl.appendChild(row);
+    }
+  } catch {
+    historySubheader.textContent = '';
+    historyTracksEl.innerHTML = '';
+    const errEl = document.createElement('div');
+    errEl.className = 'list-empty';
+    errEl.textContent = 'Failed to load history';
+    historyTracksEl.appendChild(errEl);
+  }
+}
+
+// --- Load liked track IDs at startup ---
+async function loadLikedSet(): Promise<void> {
+  try {
+    for await (const event of player.likedTracks()) {
+      if (event.type === 'queue') {
+        const q = event as MonoEventQueue;
+        likedSet.clear();
+        for (const t of q.tracks) likedSet.add(t.id);
+      }
+    }
+  } catch { /* not connected yet, will retry */ }
+}
+
 // --- Main loop: stream now_playing with reconnection ---
 async function streamNowPlaying(): Promise<void> {
   while (true) {
     try {
       await rpc.connect();
       disconnectOverlay.classList.add('hidden');
+      loadLikedSet(); // reload liked set on reconnect
 
       for await (const event of player.nowPlaying()) {
         if (event.type === 'now_playing') {
@@ -1085,7 +2141,7 @@ async function streamNowPlaying(): Promise<void> {
 // --- JS hover polyfill (CSS :hover doesn't fire in NSPanel WebView) ---
 // Native global mouseMoved monitor in Rust emits coordinates via Tauri events.
 // We use elementFromPoint to resolve the hovered element.
-const hoverSelectors = '.nav-btn, .control-btn, .list-row, .row-action, #queue-btn, #open-link, .crumb, #progress-bar, .action-btn, .new-playlist-row, .save-queue-btn';
+const hoverSelectors = '.nav-btn, .control-btn, .list-row, .row-action, #queue-btn, #open-link, .crumb, #progress-bar, .action-btn, .new-playlist-row, .save-queue-btn, .search-tab, .clickable-meta, #like-btn, #np-download-btn, #history-btn, .liked-songs-row';
 let currentHover: Element | null = null;
 
 listen<{ x: number; y: number }>('mono-tray://mousemove', (event) => {
@@ -1106,7 +2162,7 @@ listen('mono-tray://mouseleave', () => {
 
 // --- Click feedback: add .clicked class that lingers and fades out ---
 // Use 'click' event (not mousedown) since click events fire reliably in NSPanel
-const clickSelectors = '.nav-btn, .control-btn, .list-row, .row-action, #queue-btn, .action-btn, .new-playlist-row, .save-queue-btn';
+const clickSelectors = '.nav-btn, .control-btn, .list-row, .row-action, #queue-btn, .action-btn, .new-playlist-row, .save-queue-btn, #like-btn, #np-download-btn, #history-btn, .liked-songs-row';
 document.addEventListener('click', (e) => {
   const el = e.target as Element;
   const target = el.closest?.(clickSelectors);
@@ -1120,3 +2176,4 @@ document.addEventListener('click', (e) => {
 navigateTo('now-playing');
 
 streamNowPlaying();
+loadLikedSet();

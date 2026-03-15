@@ -1,6 +1,7 @@
 use anyhow::anyhow;
 use clap::Parser;
 use plexus_core::plexus::DynamicHub;
+use plexus_mono::storage::MonoStorage;
 use plexus_mono::{MonoHub, PlayerHub};
 use plexus_transport::TransportServer;
 use std::sync::Arc;
@@ -88,8 +89,18 @@ async fn run_server(args: Args) -> anyhow::Result<()> {
         MonoHub::new().await
     };
 
+    // Initialize SQLite storage for likes & downloads
+    let db_path = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".plexus/monochrome/mono.db");
+    let storage = Arc::new(
+        MonoStorage::new(db_path)
+            .await
+            .map_err(|e| anyhow!("storage init failed: {e}"))?,
+    );
+
     // Build the player activation (stateful — audio engine + queue + playlists)
-    let player_hub = PlayerHub::new(mono_hub.client()).await;
+    let player_hub = PlayerHub::new(mono_hub.client(), storage).await;
 
     // Wrap in a DynamicHub named "monochrome" with two sibling activations
     let hub = Arc::new(

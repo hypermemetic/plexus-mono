@@ -131,16 +131,16 @@ impl MonoClient {
         })
     }
 
-    /// Download audio to a file, yielding progress events.
+    /// Download audio to a file, streaming progress events via a channel.
     ///
-    /// Returns a stream of `DownloadProgress` followed by `DownloadComplete`.
+    /// Returns a receiver that yields `DownloadProgress` events followed by `DownloadComplete`.
     /// `path` should be a file path (e.g. `/tmp/track.flac`).
     pub async fn download(
         &self,
         id: u64,
         quality: &str,
         path: &str,
-    ) -> Result<Vec<MonoEvent>, String> {
+    ) -> Result<tokio::sync::mpsc::Receiver<MonoEvent>, String> {
         use futures::StreamExt;
         use tokio::io::AsyncWriteExt;
 
@@ -165,56 +165,66 @@ impl MonoClient {
         }
 
         let total_bytes = resp.content_length();
-        let mut file = tokio::fs::File::create(path)
+        let file = tokio::fs::File::create(path)
             .await
             .map_err(|e| format!("failed to create {path}: {e}"))?;
 
-        let mut stream = resp.bytes_stream();
-        let mut bytes_downloaded: u64 = 0;
-        let mut events = vec![manifest];
+        let (tx, rx) = tokio::sync::mpsc::channel::<MonoEvent>(16);
+        let path = path.to_string();
 
-        // Emit first progress event
-        events.push(MonoEvent::DownloadProgress {
-            path: path.to_string(),
-            bytes_downloaded: 0,
-            total_bytes,
-            percent: Some(0.0),
-        });
+        tokio::spawn(async move {
+            let mut file = file;
+            let mut stream = resp.bytes_stream();
+            let mut bytes_downloaded: u64 = 0;
 
-        const CHUNK_REPORT: u64 = 256 * 1024; // report every 256 KB
-        let mut since_last_report: u64 = 0;
+            let _ = tx.send(MonoEvent::DownloadProgress {
+                path: path.clone(),
+                bytes_downloaded: 0,
+                total_bytes,
+                percent: Some(0.0),
+            }).await;
 
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| format!("stream error: {e}"))?;
-            file.write_all(&chunk)
-                .await
-                .map_err(|e| format!("write error: {e}"))?;
+            const CHUNK_REPORT: u64 = 256 * 1024;
+            let mut since_last_report: u64 = 0;
 
-            bytes_downloaded += chunk.len() as u64;
-            since_last_report += chunk.len() as u64;
+            while let Some(chunk) = stream.next().await {
+                let chunk = match chunk {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = tx.send(MonoEvent::Error { message: format!("stream error: {e}") }).await;
+                        return;
+                    }
+                };
+                if file.write_all(&chunk).await.is_err() {
+                    return;
+                }
 
-            if since_last_report >= CHUNK_REPORT {
-                since_last_report = 0;
-                let percent = total_bytes
-                    .map(|t| (bytes_downloaded as f32 / t as f32) * 100.0);
-                events.push(MonoEvent::DownloadProgress {
-                    path: path.to_string(),
-                    bytes_downloaded,
-                    total_bytes,
-                    percent,
-                });
+                bytes_downloaded += chunk.len() as u64;
+                since_last_report += chunk.len() as u64;
+
+                if since_last_report >= CHUNK_REPORT {
+                    since_last_report = 0;
+                    let percent = total_bytes
+                        .map(|t| (bytes_downloaded as f32 / t as f32) * 100.0);
+                    let _ = tx.send(MonoEvent::DownloadProgress {
+                        path: path.clone(),
+                        bytes_downloaded,
+                        total_bytes,
+                        percent,
+                    }).await;
+                }
             }
-        }
 
-        file.flush().await.map_err(|e| format!("flush error: {e}"))?;
+            let _ = file.flush().await;
 
-        events.push(MonoEvent::DownloadComplete {
-            path: path.to_string(),
-            bytes: bytes_downloaded,
-            mime_type,
+            let _ = tx.send(MonoEvent::DownloadComplete {
+                path: path.clone(),
+                bytes: bytes_downloaded,
+                mime_type,
+            }).await;
         });
 
-        Ok(events)
+        Ok(rx)
     }
 
     // ── Track ────────────────────────────────────────────────────────────────

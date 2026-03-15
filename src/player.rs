@@ -12,7 +12,10 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{watch, Mutex};
 
+use stream_download::source::SourceStream;
+
 use crate::client::MonoClient;
+use crate::storage::MonoStorage;
 use crate::types::{ListenEvent, ListenOutcome, MonoEvent, PlayStatus, QueuedTrack, TrackStats};
 
 /// Persisted player state — saved to disk so playback can resume across restarts
@@ -189,6 +192,8 @@ pub struct NowPlaying {
     pub preamp: f32,
     pub queue_length: usize,
     pub url: Option<String>,
+    pub is_liked: Option<bool>,
+    pub is_downloaded: Option<bool>,
 }
 
 impl Default for NowPlaying {
@@ -205,6 +210,8 @@ impl Default for NowPlaying {
             preamp: 1.0,
             queue_length: 0,
             url: None,
+            is_liked: None,
+            is_downloaded: None,
         }
     }
 }
@@ -219,16 +226,17 @@ struct PlayerInner {
     /// Pre-buffered audio readers keyed by track ID.
     /// Each entry is a StreamDownload that's already connected and downloading.
     /// Dropped automatically when removed (temp file cleaned up via RAII).
-    prefetched: HashMap<u64, Box<dyn ReadSeekSend>>,
+    prefetched: HashMap<u64, (Box<dyn ReadSeekSend>, Option<u64>)>,
     /// Timestamp when current track started playing (ISO 8601)
     listen_started_at: Option<String>,
 }
 
 /// Audio playback engine with queue and controls
 pub struct Player {
-    sink: Arc<rodio::Sink>,
+    sink: Arc<rodio::Player>,
     inner: Mutex<PlayerInner>,
     stats: Mutex<StatsStore>,
+    storage: Arc<MonoStorage>,
     now_playing_tx: watch::Sender<NowPlaying>,
     now_playing_rx: watch::Receiver<NowPlaying>,
     client: Arc<MonoClient>,
@@ -238,17 +246,17 @@ pub struct Player {
 
 impl Player {
     /// Create a new Player. Spawns a dedicated audio thread and background watchers.
-    pub async fn new(client: Arc<MonoClient>) -> Arc<Self> {
+    pub async fn new(client: Arc<MonoClient>, storage: Arc<MonoStorage>) -> Arc<Self> {
         let (sink_tx, sink_rx) = std::sync::mpsc::channel();
         let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
 
         std::thread::spawn(move || {
-            let (_stream, handle) = rodio::OutputStream::try_default()
+            let mut stream = rodio::DeviceSinkBuilder::open_default_sink()
                 .expect("failed to open default audio output device");
-            let sink = rodio::Sink::try_new(&handle)
-                .expect("failed to create audio sink");
+            stream.log_on_drop(false);
+            let sink = rodio::Player::connect_new(stream.mixer());
             let _ = sink_tx.send(sink);
-            // Keep _stream alive until Player is dropped
+            // Keep stream alive until Player is dropped
             let _ = shutdown_rx.recv();
         });
 
@@ -270,6 +278,7 @@ impl Player {
                 listen_started_at: None,
             }),
             stats: Mutex::new(StatsStore::load()),
+            storage,
             now_playing_tx,
             now_playing_rx,
             client,
@@ -502,8 +511,16 @@ impl Player {
     /// Broadcast current state through the watch channel
     async fn broadcast_now_playing(&self) {
         let inner = self.inner.lock().await;
+        let track_id = inner.current_track.as_ref().map(|t| t.id);
+        let (is_liked, is_downloaded) = if let Some(id) = track_id {
+            let liked = self.storage.is_liked(id).await.unwrap_or(false);
+            let downloaded = self.storage.is_downloaded(id).await.unwrap_or(false);
+            (Some(liked), Some(downloaded))
+        } else {
+            (None, None)
+        };
         let np = NowPlaying {
-            track_id: inner.current_track.as_ref().map(|t| t.id),
+            track_id,
             title: inner.current_track.as_ref().map(|t| t.title.clone()),
             artist: inner.current_track.as_ref().map(|t| t.artist.clone()),
             album: inner.current_track.as_ref().map(|t| t.album.clone()),
@@ -518,6 +535,8 @@ impl Player {
             preamp: inner.preamp,
             queue_length: inner.queue.len(),
             url: inner.current_track.as_ref().map(|t| format!("https://monochrome.tf/track/t/{}", t.id)),
+            is_liked,
+            is_downloaded,
         };
         let _ = self.now_playing_tx.send(np);
     }
@@ -556,40 +575,31 @@ impl Player {
         }
         self.broadcast_now_playing().await;
 
-        // Check for a pre-buffered reader first
-        let prefetched: Option<Box<dyn ReadSeekSend>> = {
+        // Priority: prefetch cache → local download → HTTP stream
+        let (reader, content_length): (Box<dyn ReadSeekSend>, Option<u64>) = {
             let mut inner = self.inner.lock().await;
-            inner.prefetched.remove(&track.id)
+            if let Some((r, cl)) = inner.prefetched.remove(&track.id) {
+                tracing::debug!("using prefetched audio for track {}", track.id);
+                (r, cl)
+            } else {
+                drop(inner);
+                self.resolve_audio_source(&track).await?
+            }
         };
 
-        let reader: Box<dyn ReadSeekSend> = if let Some(r) = prefetched {
-            tracing::debug!("using prefetched audio for track {}", track.id);
-            r
-        } else {
-            // Resolve CDN URL
-            let manifest = self.client.stream_manifest(track.id, &track.quality).await?;
-            let url = match &manifest {
-                MonoEvent::StreamManifest { url, .. } => url.clone(),
-                _ => return Err("unexpected manifest type".to_string()),
-            };
-
-            // Create streaming reader (async HTTP → Read+Seek buffer)
-            let r = stream_download::StreamDownload::new_http(
-                url.parse::<reqwest::Url>()
-                    .map_err(|e| format!("bad stream url: {e}"))?,
-                stream_download::storage::temp::TempStorageProvider::new(),
-                stream_download::Settings::default(),
-            )
-            .await
-            .map_err(|e| format!("stream download error: {e}"))?;
-            Box::new(r)
-        };
-
-        // Decode on blocking thread (reads file headers from network buffer)
-        let source = tokio::task::spawn_blocking(move || rodio::Decoder::new(reader))
-            .await
-            .map_err(|e| format!("decoder task panicked: {e}"))?
-            .map_err(|e| format!("audio decode error: {e}"))?;
+        // Decode on blocking thread — tell symphonia the stream is seekable
+        let source = tokio::task::spawn_blocking(move || {
+            let mut builder = rodio::Decoder::builder()
+                .with_data(reader)
+                .with_seekable(true);
+            if let Some(len) = content_length {
+                builder = builder.with_byte_len(len);
+            }
+            builder.build()
+        })
+        .await
+        .map_err(|e| format!("decoder task panicked: {e}"))?
+        .map_err(|e| format!("audio decode error: {e}"))?;
 
         // Stop previous audio, append new source, play
         self.sink.stop();
@@ -603,6 +613,49 @@ impl Player {
         self.broadcast_now_playing().await;
 
         Ok(())
+    }
+
+    /// Try local download first, fall back to HTTP stream
+    async fn resolve_audio_source(
+        &self,
+        track: &QueuedTrack,
+    ) -> Result<(Box<dyn ReadSeekSend>, Option<u64>), String> {
+        // Check download registry for offline playback
+        if let Ok(Some(path)) = self.storage.get_download_path(track.id).await {
+            let p = std::path::Path::new(&path);
+            if p.exists() {
+                if let Ok(file) = std::fs::File::open(p) {
+                    let len = file.metadata().map(|m| m.len()).ok();
+                    tracing::debug!("offline playback for track {}: {}", track.id, path);
+                    return Ok((Box::new(file), len));
+                }
+            }
+        }
+
+        // Resolve CDN URL
+        let manifest = self.client.stream_manifest(track.id, &track.quality).await?;
+        let url = match &manifest {
+            MonoEvent::StreamManifest { url, .. } => url.clone(),
+            _ => return Err("unexpected manifest type".to_string()),
+        };
+
+        // Create streaming reader
+        let http_stream = stream_download::http::HttpStream::<
+            stream_download::http::reqwest::Client,
+        >::create(
+            url.parse::<reqwest::Url>().map_err(|e| format!("bad stream url: {e}"))?
+        )
+        .await
+        .map_err(|e| format!("http stream error: {e}"))?;
+        let cl = http_stream.content_length();
+        let r = stream_download::StreamDownload::from_stream(
+            http_stream,
+            stream_download::storage::temp::TempStorageProvider::new(),
+            stream_download::Settings::default(),
+        )
+        .await
+        .map_err(|e| format!("stream download error: {e}"))?;
+        Ok((Box::new(r), cl))
     }
 
     /// Play a track immediately, stopping whatever is currently playing.
@@ -762,8 +815,13 @@ impl Player {
 
     /// Add a track to the end of the queue. Auto-starts if idle.
     pub async fn queue_add(&self, id: u64, quality: &str) -> Result<(), String> {
+        self.queue_add_with_source(id, quality, None).await
+    }
+
+    pub async fn queue_add_with_source(&self, id: u64, quality: &str, source: Option<String>) -> Result<(), String> {
         let track_info = self.client.track_info(id).await.ok();
-        let queued = make_queued_track(id, quality, track_info);
+        let mut queued = make_queued_track(id, quality, track_info);
+        queued.source = source;
 
         let should_start = {
             let mut inner = self.inner.lock().await;
@@ -802,6 +860,7 @@ impl Player {
                     duration_secs: *duration_secs,
                     quality: quality.to_string(),
                     cover_id: None,
+                    source: None,
                 });
             }
         }
@@ -955,9 +1014,21 @@ impl Player {
                 Err(_) => continue,
             };
 
-            // Start download — the temp file will buffer audio in the background
-            let reader = match stream_download::StreamDownload::new_http(
-                parsed,
+            // Start download with content_length extraction
+            let http_stream = match stream_download::http::HttpStream::<
+                stream_download::http::reqwest::Client,
+            >::create(parsed)
+            .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::debug!("prefetch http stream failed for {}: {e}", track.id);
+                    continue;
+                }
+            };
+            let content_length = http_stream.content_length();
+            let reader = match stream_download::StreamDownload::from_stream(
+                http_stream,
                 stream_download::storage::temp::TempStorageProvider::new(),
                 stream_download::Settings::default(),
             )
@@ -972,7 +1043,7 @@ impl Player {
 
             tracing::debug!("prefetched track {} ({})", track.id, track.title);
             let mut inner = self.inner.lock().await;
-            inner.prefetched.insert(track.id, Box::new(reader));
+            inner.prefetched.insert(track.id, (Box::new(reader), content_length));
         }
     }
 
@@ -1080,6 +1151,107 @@ impl Player {
         stats.listen_log.clear();
         stats.save();
     }
+
+    // ── Likes & Downloads ────────────────────────────────────────────────
+
+    /// Get a reference to the storage layer
+    pub fn storage(&self) -> &MonoStorage {
+        &self.storage
+    }
+
+    /// Toggle like on a track. Returns new liked state.
+    pub async fn toggle_like(&self, track_id: u64) -> Result<bool, String> {
+        let result = self.storage.toggle_like(track_id).await?;
+        self.broadcast_now_playing().await;
+        Ok(result)
+    }
+
+    /// Get all liked track IDs
+    pub async fn liked_ids(&self) -> Result<Vec<u64>, String> {
+        self.storage.liked_ids().await
+    }
+
+    /// Download a track, register in storage, stream progress events via channel
+    pub async fn download_track(
+        self: &Arc<Self>,
+        id: u64,
+        quality: &str,
+    ) -> Result<tokio::sync::mpsc::Receiver<MonoEvent>, String> {
+        // Get track info for organized path
+        let track_info = self.client.track_info(id).await.ok();
+        let (title, artist, album) = match &track_info {
+            Some(MonoEvent::Track { title, artist, album, .. }) => {
+                (title.clone(), artist.clone(), album.clone())
+            }
+            _ => (format!("Track {id}"), String::from("Unknown"), String::from("Unknown")),
+        };
+
+        // Get stream manifest for extension
+        let manifest = self.client.stream_manifest(id, quality).await?;
+        let ext = match &manifest {
+            MonoEvent::StreamManifest { extension, .. } => extension.clone(),
+            _ => "flac".to_string(),
+        };
+
+        // Build path: ~/Music/mono-tray/{artist}/{album}/{title}.{ext}
+        let base = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("Music/mono-tray");
+        let sanitize = |s: &str| s.replace('/', "_").replace('\\', "_").replace(':', "_");
+        let dir = base.join(sanitize(&artist)).join(sanitize(&album));
+        std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir failed: {e}"))?;
+        let path = dir.join(format!("{}.{}", sanitize(&title), ext));
+        let path_str = path.to_string_lossy().to_string();
+
+        // Start download — returns a channel of progress events
+        let mut inner_rx = self.client.download(id, quality, &path_str).await?;
+
+        // Wrap in a new channel so we can register + broadcast after completion
+        let (tx, rx) = tokio::sync::mpsc::channel::<MonoEvent>(16);
+        let player = self.clone();
+        let title_c = title.clone();
+        let artist_c = artist.clone();
+        let album_c = album.clone();
+        let quality_c = quality.to_string();
+
+        tokio::spawn(async move {
+            while let Some(event) = inner_rx.recv().await {
+                let is_complete = matches!(&event, MonoEvent::DownloadComplete { .. });
+                if tx.send(event).await.is_err() {
+                    return;
+                }
+                if is_complete {
+                    let _ = player.storage
+                        .register_download(
+                            id,
+                            &path_str,
+                            Some(&title_c),
+                            Some(&artist_c),
+                            Some(&album_c),
+                            Some(&quality_c),
+                        )
+                        .await;
+                    player.broadcast_now_playing().await;
+                    return;
+                }
+            }
+        });
+
+        Ok(rx)
+    }
+
+    /// Delete a downloaded track from local storage
+    pub async fn delete_download(&self, track_id: u64) -> Result<Option<String>, String> {
+        let path = self.storage.delete_download(track_id).await?;
+        self.broadcast_now_playing().await;
+        Ok(path)
+    }
+
+    /// Get playback history (queue of previously played tracks)
+    pub async fn get_history(&self) -> Vec<QueuedTrack> {
+        let inner = self.inner.lock().await;
+        inner.history.clone()
+    }
 }
 
 /// Build a QueuedTrack from track info (or fallback to minimal metadata)
@@ -1100,6 +1272,7 @@ fn make_queued_track(id: u64, quality: &str, info: Option<MonoEvent>) -> QueuedT
             duration_secs,
             quality: quality.to_string(),
             cover_id,
+            source: None,
         },
         _ => QueuedTrack {
             id,
@@ -1109,6 +1282,7 @@ fn make_queued_track(id: u64, quality: &str, info: Option<MonoEvent>) -> QueuedT
             duration_secs: 0,
             quality: quality.to_string(),
             cover_id: None,
+            source: None,
         },
     }
 }

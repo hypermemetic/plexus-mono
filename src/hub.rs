@@ -243,8 +243,8 @@ impl MonoHub {
         let quality = quality.unwrap_or_else(|| "LOSSLESS".to_string());
         stream! {
             match client.download(id, &quality, &path).await {
-                Ok(events) => {
-                    for event in events {
+                Ok(mut rx) => {
+                    while let Some(event) = rx.recv().await {
                         yield event;
                     }
                 }
