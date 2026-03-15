@@ -1,3 +1,16 @@
+# Rust
 /target/
+mono-tray/src-tauri/target/
+
+# Node
+node_modules/
+dist/
+
+# OS
 .DS_Store
+
+# Data
 *.db
+
+# Tauri generated schemas (large, regenerated on build)
+mono-tray/src-tauri/gen/schemas/
