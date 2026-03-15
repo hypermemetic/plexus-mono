@@ -275,6 +275,10 @@ impl PlaylistHub {
     ) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let hub = self.clone();
         stream! {
+            if name == "Liked" {
+                yield MonoEvent::Error { message: "Liked playlist is auto-managed — use like/unlike to modify".into() };
+                return;
+            }
             let path = hub.playlist_path(&name);
             match std::fs::remove_file(&path) {
                 Ok(()) => yield MonoEvent::PlayerAck {
@@ -303,6 +307,10 @@ impl PlaylistHub {
     ) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let hub = self.clone();
         stream! {
+            if name == "Liked" || new_name == "Liked" {
+                yield MonoEvent::Error { message: "Liked playlist is auto-managed — cannot rename".into() };
+                return;
+            }
             match hub.load(&name) {
                 Ok(mut data) => {
                     if hub.playlist_path(&new_name).exists() {
@@ -346,6 +354,10 @@ impl PlaylistHub {
         let hub = self.clone();
         let quality = quality.unwrap_or_else(|| "LOSSLESS".into());
         stream! {
+            if name == "Liked" {
+                yield MonoEvent::Error { message: "Liked playlist is auto-managed — use like/unlike to modify".into() };
+                return;
+            }
             let mut data = match hub.load(&name) {
                 Ok(d) => d,
                 Err(e) => { yield MonoEvent::Error { message: e }; return; }
@@ -395,6 +407,10 @@ impl PlaylistHub {
     ) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let hub = self.clone();
         stream! {
+            if name == "Liked" {
+                yield MonoEvent::Error { message: "Liked playlist is auto-managed — use like/unlike to modify".into() };
+                return;
+            }
             let mut data = match hub.load(&name) {
                 Ok(d) => d,
                 Err(e) => { yield MonoEvent::Error { message: e }; return; }
@@ -466,6 +482,10 @@ impl PlaylistHub {
     ) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let hub = self.clone();
         stream! {
+            if name == "Liked" {
+                yield MonoEvent::Error { message: "Liked playlist is auto-managed — use like/unlike to modify".into() };
+                return;
+            }
             let mut data = match hub.load(&name) {
                 Ok(d) => d,
                 Err(e) => { yield MonoEvent::Error { message: e }; return; }

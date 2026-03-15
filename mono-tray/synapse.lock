@@ -2,14 +2,14 @@
     "version": "1",
     "synapseCC": "0.2.0",
     "hubCodegen": "0.2.0",
-    "updatedAt": "2026-03-14T23:19:15Z",
+    "updatedAt": "2026-03-15T19:21:26Z",
     "targets": {
         "generated": {
             "backend": "monochrome",
             "irHash": "a035b8ce22826090",
             "transport": "browser",
             "files": {
-                ".codegen-metadata.json": "261147989a778c78",
+                ".codegen-metadata.json": "8c57a5b0a9525e8b",
                 "index.ts": "c0501d368aeb9cc9",
                 "monochrome/client.ts": "d528a2041214dd1d",
                 "monochrome/index.ts": "60b309e09f7d18ff",
@@ -20,7 +20,7 @@
                 "monochrome/player/index.ts": "687d823e9e25068d",
                 "monochrome/player/playlist/client.ts": "b4e524bcf66da979",
                 "monochrome/player/playlist/index.ts": "dcce88d0c0b62b1c",
-                "package.json": "65d9521ece54ba68",
+                "package.json": "a0362a966d37607a",
                 "player/client.ts": "891a7a7ded458acb",
                 "player/index.ts": "8173068418fb7d83",
                 "player/playlist/client.ts": "47cd5b7070bb2ebc",
@@ -30,7 +30,7 @@
                 "test/smoke.test.ts": "8bdaba13b5fe4d09",
                 "transport.ts": "8fc77d72d6b90f89",
                 "tsconfig.json": "ebf6a311e13a8eed",
-                "types.ts": "6e5d7dce54b4b46b"
+                "types.ts": "448e5bdbebbbf007"
             }
         },
         "generated-substrate": {
@@ -52,6 +52,27 @@
                 "tsconfig.json": "ebf6a311e13a8eed",
                 "types.ts": "89502efc00dbb8b8"
             }
+        },
+        "generated/substrate": {
+            "backend": "substrate",
+            "irHash": "cf6f5e649fd5a921",
+            "transport": "browser",
+            "files": {
+                ".codegen-metadata.json": "19b2e621faeabcde",
+                "claudecode/client.ts": "636728ad524c17c8",
+                "claudecode/index.ts": "92e376f3f4309522",
+                "claudecode/types.ts": "ebae6ad6e7aacc67",
+                "cone/types.ts": "c11c24c1595bf7e3",
+                "index.ts": "327f942783869561",
+                "package.json": "3569daab11a0b532",
+                "rpc.ts": "3a0b3b8295270ae7",
+                "test/bidir-smoke.test.ts": "bcd06c94f9d4c352",
+                "test/smoke.test.ts": "a295034bc894304b",
+                "transport.ts": "95febd4c63a16306",
+                "tsconfig.json": "ebf6a311e13a8eed",
+                "types.ts": "87091728661bd314"
+            },
+            "sharedTransport": "client"
         }
     }
 }

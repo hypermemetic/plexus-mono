@@ -41,6 +41,12 @@ impl MonoStorage {
         .await
         .map_err(|e| format!("migration failed: {e}"))?;
 
+        // Add source column to likes (idempotent — .ok() since SQLite has no IF NOT EXISTS for ALTER)
+        sqlx::query("ALTER TABLE likes ADD COLUMN source TEXT")
+            .execute(&self.pool)
+            .await
+            .ok();
+
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS downloads (
                 track_id INTEGER PRIMARY KEY,
@@ -62,7 +68,7 @@ impl MonoStorage {
     // ── Likes ────────────────────────────────────────────────────────────
 
     /// Toggle like state. Returns the new liked state (true = now liked).
-    pub async fn toggle_like(&self, track_id: u64) -> Result<bool, String> {
+    pub async fn toggle_like(&self, track_id: u64, source: Option<String>) -> Result<bool, String> {
         let exists = self.is_liked(track_id).await?;
         if exists {
             sqlx::query("DELETE FROM likes WHERE track_id = ?")
@@ -73,9 +79,10 @@ impl MonoStorage {
             Ok(false)
         } else {
             let now = chrono::Utc::now().timestamp();
-            sqlx::query("INSERT INTO likes (track_id, created_at) VALUES (?, ?)")
+            sqlx::query("INSERT INTO likes (track_id, created_at, source) VALUES (?, ?, ?)")
                 .bind(track_id as i64)
                 .bind(now)
+                .bind(source.as_deref())
                 .execute(&self.pool)
                 .await
                 .map_err(|e| format!("like failed: {e}"))?;
@@ -101,6 +108,22 @@ impl MonoStorage {
             .await
             .map_err(|e| format!("liked_ids query failed: {e}"))?;
         Ok(rows.iter().map(|r| r.get::<i64, _>("track_id") as u64).collect())
+    }
+
+    /// Get all liked track IDs with their source annotation, ordered by most recently liked first.
+    pub async fn liked_ids_with_source(&self) -> Result<Vec<(u64, Option<String>)>, String> {
+        let rows = sqlx::query("SELECT track_id, source FROM likes ORDER BY created_at DESC")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| format!("liked_ids_with_source query failed: {e}"))?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                let id = r.get::<i64, _>("track_id") as u64;
+                let source: Option<String> = r.get("source");
+                (id, source)
+            })
+            .collect())
     }
 
     // ── Downloads ────────────────────────────────────────────────────────

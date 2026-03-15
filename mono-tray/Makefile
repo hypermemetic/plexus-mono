@@ -59,12 +59,18 @@ backend-restart:
 	cd .. && cargo run --bin plexus-mono
 
 # Full cycle: restart backend, regenerate clients, build & run app
+# Use: make full FORCE_CODEGEN=1 to force client regeneration
+CODEGEN_FLAGS =
+ifdef FORCE_CODEGEN
+CODEGEN_FLAGS = --force
+endif
+
 full:
 	-lsof -ti :4448 | xargs kill 2>/dev/null; sleep 0.5
 	cd .. && cargo build --bin plexus-mono
 	cd .. && cargo run --bin plexus-mono &
-	sleep 2
-	synapse-cc build --force
+	synapse-cc wait monochrome --url ws://127.0.0.1:4448 --timeout 15
+	synapse-cc build $(CODEGEN_FLAGS)
 	$(MAKE) run
 
 # Clean build artifacts

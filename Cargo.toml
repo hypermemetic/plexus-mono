@@ -1,6 +1,6 @@
 [package]
 name = "plexus-mono"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Monochrome music API Plexus RPC activation — search, metadata, lyrics, and recommendations"
 license = "MIT"

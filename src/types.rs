@@ -233,6 +233,9 @@ pub enum MonoEvent {
         /// Whether the current track is downloaded locally
         #[serde(default, skip_serializing_if = "Option::is_none")]
         is_downloaded: Option<bool>,
+        /// Current audio peak level (0.0–1.0) for waveform visualization
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audio_peak: Option<f32>,
     },
 
     /// Queue contents snapshot

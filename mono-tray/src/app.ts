@@ -3,8 +3,7 @@ import { createPlayerClient } from '../generated/player/client';
 import { createPlayerPlaylistClient } from '../generated/player/playlist/client';
 import { createMonoClient } from '../generated/mono/client';
 import type { MonoEvent, MonoEventNowPlaying, MonoEventCover, MonoEventPlaylistInfo, MonoEventSearchTrack, MonoEventSearchAlbum, MonoEventSearchArtist, MonoEventAlbum, MonoEventAlbumTrack, MonoEventArtist, MonoEventQueue, QueuedTrack } from '../generated/player/types';
-import { PlexusRpcClient as SubstratePlexusRpcClient } from '../generated-substrate/transport';
-import { createClaudecodeClient } from '../generated-substrate/claudecode/client';
+import { createClaudecodeClient } from '../generated/substrate/claudecode/client';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 
 // --- Show/hide animations + click-away dismiss ---
@@ -18,7 +17,7 @@ let hiding = false;
 type ViewName = 'now-playing' | 'browse' | 'detail' | 'queue' | 'research' | 'history';
 
 const VIEW_HEIGHTS: Record<ViewName, number> = {
-  'now-playing': 556,
+  'now-playing': 582,
   'browse': 600,
   'detail': 600,
   'queue': 600,
@@ -124,6 +123,17 @@ const historyBtn = document.getElementById('history-btn')!;
 const historySubheader = document.getElementById('history-subheader')!;
 const historyTracksEl = document.getElementById('history-tracks')!;
 
+// --- Waveform state ---
+const waveformCanvas = document.getElementById('waveform-canvas') as HTMLCanvasElement;
+const waveCtx = waveformCanvas.getContext('2d')!;
+const PEAK_BUFFER_SIZE = 150;
+const peakBuffer = new Float32Array(PEAK_BUFFER_SIZE);
+let peakWriteIndex = 0;
+let peakBufferFilled = 0;
+let silenceSince: number | null = null;
+let waveformAnimId = 0;
+let lastWaveformTrackId: number | null = null;
+
 // --- Notifications ---
 async function initNotifications(): Promise<void> {
   try {
@@ -158,7 +168,7 @@ const playlist = createPlayerPlaylistClient(rpc);
 const mono = createMonoClient(rpc);
 
 // Substrate RPC client for AI research (claudecode)
-const substrateRpc = new SubstratePlexusRpcClient({
+const substrateRpc = new PlexusRpcClient({
   backend: 'substrate',
   url: 'ws://127.0.0.1:4444',
   debug: false,
@@ -468,7 +478,87 @@ function updateUI(np: MonoEventNowPlaying): void {
     currentTrackId = null;
     albumArt.classList.remove('loaded');
   }
+
+  // --- Waveform peak processing ---
+  const audioPeak = (np as any).audioPeak ?? 0;
+  // Reset buffer on track change
+  if (np.trackId !== lastWaveformTrackId) {
+    lastWaveformTrackId = np.trackId ?? null;
+    peakBuffer.fill(0);
+    peakWriteIndex = 0;
+    peakBufferFilled = 0;
+    silenceSince = null;
+  }
+
+  if (np.status === 'playing') {
+    // Generate ~3 intermediate values with jitter for organic look
+    const jitterCount = 3;
+    for (let i = 0; i < jitterCount; i++) {
+      const jitter = audioPeak * (0.6 + Math.random() * 0.8);
+      peakBuffer[peakWriteIndex] = jitter;
+      peakWriteIndex = (peakWriteIndex + 1) % PEAK_BUFFER_SIZE;
+      if (peakBufferFilled < PEAK_BUFFER_SIZE) peakBufferFilled++;
+    }
+
+    // Silence detection
+    if (audioPeak < 0.005) {
+      if (silenceSince === null) silenceSince = Date.now();
+    } else {
+      silenceSince = null;
+    }
+  }
 }
+
+// --- Waveform drawing ---
+function drawWaveform(): void {
+  waveformAnimId = requestAnimationFrame(drawWaveform);
+
+  const w = waveformCanvas.width;
+  const h = waveformCanvas.height;
+  waveCtx.clearRect(0, 0, w, h);
+
+  if (!isPlaying || peakBufferFilled === 0) return;
+
+  // Dotted line while scrubbing
+  if (scrubbing) {
+    waveCtx.setLineDash([4, 4]);
+    waveCtx.strokeStyle = '#888';
+    waveCtx.lineWidth = 1;
+    waveCtx.beginPath();
+    waveCtx.moveTo(0, h / 2);
+    waveCtx.lineTo(w, h / 2);
+    waveCtx.stroke();
+    waveCtx.setLineDash([]);
+    return;
+  }
+
+  const silenceWarning = silenceSince !== null && (Date.now() - silenceSince) > 5000;
+  const barCount = Math.min(peakBufferFilled, PEAK_BUFFER_SIZE);
+  const barWidth = w / PEAK_BUFFER_SIZE;
+  const accentColor = silenceWarning ? '#e74c3c' : '#1db954';
+
+  waveCtx.fillStyle = accentColor;
+
+  for (let i = 0; i < barCount; i++) {
+    // Read from buffer: oldest to newest
+    const bufIdx = (peakWriteIndex - barCount + i + PEAK_BUFFER_SIZE) % PEAK_BUFFER_SIZE;
+    const peak = peakBuffer[bufIdx];
+    const barH = Math.max(1, peak * h * 0.9);
+    const x = i * barWidth;
+    const y = (h - barH) / 2;
+    waveCtx.fillRect(x, y, Math.max(1, barWidth - 0.5), barH);
+  }
+
+  if (silenceWarning) {
+    waveCtx.fillStyle = '#e74c3c';
+    waveCtx.font = '10px -apple-system, sans-serif';
+    waveCtx.textAlign = 'center';
+    waveCtx.fillText('No audio', w / 2, h / 2 + 3);
+  }
+}
+
+// Start waveform animation loop
+drawWaveform();
 
 // --- Navigation ---
 function updateBreadcrumbs(view: ViewName): void {
@@ -635,8 +725,10 @@ async function loadPlaylists(): Promise<void> {
 function renderPlaylistList(playlists: MonoEventPlaylistInfo[]): void {
   browseList.innerHTML = '';
 
-  // Liked Songs virtual playlist
-  if (likedSet.size > 0) {
+  // Render Liked playlist at top if present (real backend file)
+  const likedIdx = playlists.findIndex(pl => pl.name === 'Liked');
+  if (likedIdx >= 0) {
+    const likedPl = playlists[likedIdx];
     const likedRow = document.createElement('div');
     likedRow.className = 'liked-songs-row';
     likedRow.innerHTML = `
@@ -645,13 +737,13 @@ function renderPlaylistList(playlists: MonoEventPlaylistInfo[]): void {
       </div>
       <div class="list-row-info">
         <div class="list-row-title">Liked Songs</div>
-        <div class="list-row-sub">${likedSet.size} track${likedSet.size !== 1 ? 's' : ''}</div>
+        <div class="list-row-sub">${likedPl.trackCount} track${likedPl.trackCount !== 1 ? 's' : ''}</div>
       </div>
     `;
     likedRow.addEventListener('click', () => {
-      currentPlaylistName = 'Liked Songs';
+      currentPlaylistName = 'Liked';
       navigateTo('detail');
-      loadLikedSongsDetail();
+      loadPlaylistDetail('Liked');
     });
     browseList.appendChild(likedRow);
   }
@@ -671,6 +763,7 @@ function renderPlaylistList(playlists: MonoEventPlaylistInfo[]): void {
     return;
   }
   for (const pl of playlists) {
+    if (pl.name === 'Liked') continue; // rendered above with special styling
     browseList.appendChild(makePlaylistRow(pl));
   }
 }
@@ -1280,7 +1373,7 @@ async function loadLikedSongsDetail(): Promise<void> {
         unlikeBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="#e74c3c"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>';
         unlikeBtn.addEventListener('click', (e) => {
           e.stopPropagation();
-          rpcFire(player.like(id));
+          rpcFire(player.like(id, 'liked-songs'));
           likedSet.delete(id);
           row.remove();
         });
@@ -1973,6 +2066,13 @@ searchInput.addEventListener('keydown', (e) => {
   }
 });
 
+// --- Like source helper ---
+function getLikeSource(): string {
+  if (currentView === 'detail' && currentPlaylistName) return `playlist:${currentPlaylistName}`;
+  if (currentView === 'detail' && currentDetailAlbumId) return `album:${currentPlaylistName || 'unknown'}`;
+  return currentView;
+}
+
 // --- Like button ---
 likeBtn.addEventListener('click', () => {
   if (!currentTrackId) return;
@@ -1983,7 +2083,7 @@ likeBtn.addEventListener('click', () => {
   likeBtn.classList.remove('like-animate');
   void likeBtn.offsetWidth; // reflow to restart animation
   likeBtn.classList.add('like-animate');
-  rpcFire(player.like(currentTrackId));
+  rpcFire(player.like(currentTrackId, getLikeSource()));
 });
 likeBtn.addEventListener('animationend', () => likeBtn.classList.remove('like-animate'));
 

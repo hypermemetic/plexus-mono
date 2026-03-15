@@ -14,9 +14,10 @@
       "backend": "substrate",
       "url": "ws://127.0.0.1:4444",
       "plugins": ["claudecode"],
-      "generate": ["transport", "rpc", "plugins"],
+      "generate": ["plugins"],
       "transport": "browser",
-      "outputDir": "generated-substrate"
+      "outputDir": "generated/substrate",
+      "sharedTransport": "client"
     }
   }
 }

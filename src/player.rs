@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,6 +16,7 @@ use tokio::sync::{watch, Mutex};
 use stream_download::source::SourceStream;
 
 use crate::client::MonoClient;
+use crate::playlist::PlaylistData;
 use crate::storage::MonoStorage;
 use crate::types::{ListenEvent, ListenOutcome, MonoEvent, PlayStatus, QueuedTrack, TrackStats};
 
@@ -178,6 +180,70 @@ impl<T> Pipe for T {}
 trait ReadSeekSend: std::io::Read + std::io::Seek + Send + Sync {}
 impl<T: std::io::Read + std::io::Seek + Send + Sync> ReadSeekSend for T {}
 
+/// Transparent audio source wrapper that computes peak levels in ~33ms windows.
+/// Passes samples through unchanged; stores peak in an AtomicU32 for lock-free reads.
+struct LevelMonitor<S> {
+    inner: S,
+    peak_atom: Arc<AtomicU32>,
+    window_size: usize,
+    window_pos: usize,
+    window_peak: f32,
+}
+
+impl<S: rodio::Source<Item = f32>> LevelMonitor<S> {
+    fn new(source: S, peak_atom: Arc<AtomicU32>) -> Self {
+        // ~33ms window: sample_rate * channels / 30
+        let window_size = (source.sample_rate().get() as usize * source.channels().get() as usize) / 30;
+        Self {
+            inner: source,
+            peak_atom,
+            window_size: window_size.max(1),
+            window_pos: 0,
+            window_peak: 0.0,
+        }
+    }
+}
+
+impl<S: rodio::Source<Item = f32>> Iterator for LevelMonitor<S> {
+    type Item = f32;
+
+    #[inline]
+    fn next(&mut self) -> Option<f32> {
+        let sample = self.inner.next()?;
+        let abs = sample.abs();
+        if abs > self.window_peak {
+            self.window_peak = abs;
+        }
+        self.window_pos += 1;
+        if self.window_pos >= self.window_size {
+            self.peak_atom
+                .store(self.window_peak.to_bits(), Ordering::Relaxed);
+            self.window_pos = 0;
+            self.window_peak = 0.0;
+        }
+        Some(sample)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl<S: rodio::Source<Item = f32>> rodio::Source for LevelMonitor<S> {
+    fn current_span_len(&self) -> Option<usize> {
+        self.inner.current_span_len()
+    }
+    fn channels(&self) -> std::num::NonZeroU16 {
+        self.inner.channels()
+    }
+    fn sample_rate(&self) -> std::num::NonZeroU32 {
+        self.inner.sample_rate()
+    }
+    fn total_duration(&self) -> Option<Duration> {
+        self.inner.total_duration()
+    }
+}
+
 /// Snapshot of current playback state, broadcast via watch channel
 #[derive(Debug, Clone)]
 pub struct NowPlaying {
@@ -194,6 +260,7 @@ pub struct NowPlaying {
     pub url: Option<String>,
     pub is_liked: Option<bool>,
     pub is_downloaded: Option<bool>,
+    pub audio_peak: f32,
 }
 
 impl Default for NowPlaying {
@@ -212,6 +279,7 @@ impl Default for NowPlaying {
             url: None,
             is_liked: None,
             is_downloaded: None,
+            audio_peak: 0.0,
         }
     }
 }
@@ -240,6 +308,7 @@ pub struct Player {
     now_playing_tx: watch::Sender<NowPlaying>,
     now_playing_rx: watch::Receiver<NowPlaying>,
     client: Arc<MonoClient>,
+    audio_peak: Arc<AtomicU32>,
     // Dropping this signals the audio thread to exit
     _shutdown_tx: std::sync::mpsc::Sender<()>,
 }
@@ -282,6 +351,7 @@ impl Player {
             now_playing_tx,
             now_playing_rx,
             client,
+            audio_peak: Arc::new(AtomicU32::new(0)),
             _shutdown_tx: shutdown_tx,
         });
 
@@ -375,6 +445,12 @@ impl Player {
 
         // Restore persisted state (queue, history, volume) from previous session
         player.restore_state().await;
+
+        // Sync liked playlist on startup
+        {
+            let p = player.clone();
+            tokio::spawn(async move { p.sync_liked_playlist().await });
+        }
 
         player
     }
@@ -537,6 +613,7 @@ impl Player {
             url: inner.current_track.as_ref().map(|t| format!("https://monochrome.tf/track/t/{}", t.id)),
             is_liked,
             is_downloaded,
+            audio_peak: f32::from_bits(self.audio_peak.load(Ordering::Relaxed)),
         };
         let _ = self.now_playing_tx.send(np);
     }
@@ -601,9 +678,11 @@ impl Player {
         .map_err(|e| format!("decoder task panicked: {e}"))?
         .map_err(|e| format!("audio decode error: {e}"))?;
 
-        // Stop previous audio, append new source, play
+        // Stop previous audio, wrap with level monitor, append and play
         self.sink.stop();
-        self.sink.append(source);
+        self.audio_peak.store(0, Ordering::Relaxed);
+        let monitored = LevelMonitor::new(source, self.audio_peak.clone());
+        self.sink.append(monitored);
         self.sink.play();
 
         {
@@ -1160,10 +1239,80 @@ impl Player {
     }
 
     /// Toggle like on a track. Returns new liked state.
-    pub async fn toggle_like(&self, track_id: u64) -> Result<bool, String> {
-        let result = self.storage.toggle_like(track_id).await?;
+    pub async fn toggle_like(self: &Arc<Self>, track_id: u64, source: Option<String>) -> Result<bool, String> {
+        let result = self.storage.toggle_like(track_id, source).await?;
         self.broadcast_now_playing().await;
+        let this = self.clone();
+        tokio::spawn(async move { this.sync_liked_playlist().await });
         Ok(result)
+    }
+
+    /// Sync liked tracks to ~/.plexus/monochrome/player/playlists/Liked.json
+    async fn sync_liked_playlist(&self) {
+        let liked = match self.storage.liked_ids_with_source().await {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::error!("sync_liked_playlist: failed to get liked ids: {e}");
+                return;
+            }
+        };
+
+        let playlist_path = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".plexus/monochrome/player/playlists/Liked.json");
+
+        if liked.is_empty() {
+            let _ = std::fs::remove_file(&playlist_path);
+            return;
+        }
+
+        // Load existing Liked.json to reuse cached metadata
+        let existing: HashMap<u64, QueuedTrack> = std::fs::read_to_string(&playlist_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<PlaylistData>(&s).ok())
+            .map(|p| p.tracks.into_iter().map(|t| (t.id, t)).collect())
+            .unwrap_or_default();
+
+        let mut tracks = Vec::with_capacity(liked.len());
+        for (id, source) in &liked {
+            if let Some(mut cached) = existing.get(id).cloned() {
+                cached.source = source.clone();
+                tracks.push(cached);
+            } else {
+                // Fetch metadata for new likes
+                let info = self.client.track_info(*id).await.ok();
+                let queued = match info {
+                    Some(MonoEvent::Track { title, artist, album, duration_secs, cover_id, .. }) => {
+                        QueuedTrack { id: *id, title, artist, album, duration_secs, quality: "LOSSLESS".into(), cover_id, source: source.clone() }
+                    }
+                    _ => QueuedTrack {
+                        id: *id, title: format!("Track {id}"), artist: String::new(),
+                        album: String::new(), duration_secs: 0, quality: "LOSSLESS".into(), cover_id: None, source: source.clone(),
+                    },
+                };
+                tracks.push(queued);
+            }
+        }
+
+        let data = PlaylistData {
+            name: "Liked".into(),
+            description: "Auto-synced liked tracks".into(),
+            tracks,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        };
+
+        if let Some(parent) = playlist_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match serde_json::to_string_pretty(&data) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&playlist_path, json) {
+                    tracing::error!("sync_liked_playlist: write failed: {e}");
+                }
+            }
+            Err(e) => tracing::error!("sync_liked_playlist: serialize failed: {e}"),
+        }
     }
 
     /// Get all liked track IDs

@@ -67,7 +67,7 @@ impl ChildRouter for PlayerHub {
 
 #[plexus_macros::hub_methods(
     namespace = "player",
-    version = "0.2.0",
+    version = "0.3.0",
     hub,
     description = "Playback engine — play, queue, and control audio with playlist management",
     crate_path = "plexus_core"
@@ -396,6 +396,7 @@ impl PlayerHub {
                 url: np.url,
                 is_liked: np.is_liked,
                 is_downloaded: np.is_downloaded,
+                audio_peak: Some(np.audio_peak),
             };
         }
     }
@@ -446,6 +447,7 @@ impl PlayerHub {
                     url: np.url,
                     is_liked: np.is_liked,
                     is_downloaded: np.is_downloaded,
+                    audio_peak: Some(np.audio_peak),
                 };
             }
             // Then stream updates
@@ -465,6 +467,7 @@ impl PlayerHub {
                     url: np.url,
                     is_liked: np.is_liked,
                     is_downloaded: np.is_downloaded,
+                    audio_peak: Some(np.audio_peak),
                 };
             }
         }
@@ -595,15 +598,19 @@ impl PlayerHub {
     /// Toggle like on a track
     #[plexus_macros::hub_method(
         description = "Toggle like/heart on a track. Returns the new liked state.",
-        params(id = "Tidal track ID")
+        params(
+            id = "Tidal track ID",
+            source = "Where the like was triggered from (e.g. now-playing, playlist:name)"
+        )
     )]
     pub async fn like(
         &self,
         id: u64,
+        source: Option<String>,
     ) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let player = self.player.clone();
         stream! {
-            match player.toggle_like(id).await {
+            match player.toggle_like(id, source).await {
                 Ok(liked) => yield MonoEvent::PlayerAck {
                     action: "like".to_string(),
                     message: if liked { format!("liked track {id}") } else { format!("unliked track {id}") },
