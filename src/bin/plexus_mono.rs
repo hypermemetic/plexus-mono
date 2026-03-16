@@ -5,6 +5,7 @@ use plexus_mono::storage::MonoStorage;
 use plexus_mono::{MonoHub, PlayerHub};
 use plexus_transport::TransportServer;
 use std::sync::Arc;
+use tokio::signal::unix::{signal, SignalKind};
 
 /// CLI arguments for the plexus-mono standalone server
 #[derive(Parser, Debug)]
@@ -24,6 +25,10 @@ struct Args {
     /// Enable MCP HTTP server (on port + 1)
     #[arg(long)]
     mcp: bool,
+
+    /// HTTP audio proxy port for client-side failover (default: port + 2)
+    #[arg(long)]
+    audio_port: Option<u16>,
 
     /// Override the Monochrome API base URL (no trailing slash)
     ///
@@ -101,6 +106,35 @@ async fn run_server(args: Args) -> anyhow::Result<()> {
 
     // Build the player activation (stateful — audio engine + queue + playlists)
     let player_hub = PlayerHub::new(mono_hub.client(), storage).await;
+
+    // SIGTERM handler — graceful shutdown saves state + was_playing flag
+    {
+        let player = player_hub.player();
+        tokio::spawn(async move {
+            let mut sigterm = signal(SignalKind::terminate())
+                .expect("failed to install SIGTERM handler");
+            sigterm.recv().await;
+            tracing::info!("received SIGTERM — starting graceful shutdown");
+            player.graceful_shutdown().await;
+            std::process::exit(0);
+        });
+    }
+
+    // Spawn HTTP audio proxy for client-side failover
+    let audio_port = args.audio_port.unwrap_or(args.port + 2);
+    if !args.stdio {
+        let player_ref = player_hub.player();
+        let audio_client = Arc::clone(player_ref.client());
+        let audio_storage = Arc::clone(player_ref.storage());
+        tokio::spawn(async move {
+            if let Err(e) =
+                plexus_mono::audio_server::start_audio_server(audio_port, audio_client, audio_storage)
+                    .await
+            {
+                tracing::error!("audio HTTP server error: {e}");
+            }
+        });
+    }
 
     // Wrap in a DynamicHub named "monochrome" with two sibling activations
     let hub = Arc::new(

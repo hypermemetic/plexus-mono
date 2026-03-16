@@ -30,6 +30,9 @@ pub struct PlayerState {
     pub volume: f32,
     #[serde(default = "default_preamp")]
     pub preamp: f32,
+    /// Set by graceful_shutdown() — signals restore_state() to auto-resume playback
+    #[serde(default)]
+    pub was_playing: bool,
 }
 
 fn default_preamp() -> f32 {
@@ -241,6 +244,11 @@ impl<S: rodio::Source<Item = f32>> rodio::Source for LevelMonitor<S> {
     }
     fn total_duration(&self) -> Option<Duration> {
         self.inner.total_duration()
+    }
+    fn try_seek(&mut self, pos: Duration) -> Result<(), rodio::source::SeekError> {
+        self.window_pos = 0;
+        self.window_peak = 0.0;
+        self.inner.try_seek(pos)
     }
 }
 
@@ -1242,7 +1250,30 @@ impl Player {
             history: inner.history.clone(),
             volume: inner.volume,
             preamp: inner.preamp,
+            was_playing: false,
         }
+    }
+
+    /// Graceful shutdown — finalize stats, persist was_playing flag, save state.
+    /// Called from SIGTERM handler before process exit.
+    pub async fn graceful_shutdown(&self) {
+        let was_playing = {
+            let inner = self.inner.lock().await;
+            matches!(inner.status, PlayStatus::Playing | PlayStatus::Buffering)
+        };
+
+        // Finalize listen stats for current track
+        self.end_current_listen(ListenOutcome::Stop).await;
+
+        // Save state with was_playing flag so next startup auto-resumes
+        let mut state = self.get_state().await;
+        state.was_playing = was_playing;
+        state.save();
+
+        tracing::info!(
+            "graceful shutdown complete (was_playing={was_playing}, pos={:.1}s)",
+            state.position_secs
+        );
     }
 
     /// Save current state to disk
@@ -1251,11 +1282,13 @@ impl Player {
         state.save();
     }
 
-    /// Restore state from disk — resumes playback at the saved position
+    /// Restore state from disk — resumes playback at the saved position.
+    /// If `was_playing` is set (from graceful_shutdown), auto-resumes instead of pausing.
     pub async fn restore_state(&self) {
         if let Some(state) = PlayerState::load() {
             let resume_track = state.current_track.clone();
             let resume_pos = state.position_secs;
+            let auto_resume = state.was_playing;
 
             {
                 let mut inner = self.inner.lock().await;
@@ -1266,20 +1299,45 @@ impl Player {
                 self.apply_volume(&inner);
             }
 
+            // Clear was_playing on disk immediately (crash safety — only intentional
+            // shutdown triggers auto-resume, not a crash-loop)
+            if auto_resume {
+                if let Some(mut cleared) = PlayerState::load() {
+                    cleared.was_playing = false;
+                    cleared.save();
+                }
+            }
+
             // Resume the track that was playing, seeking to saved position
             if let Some(track) = resume_track {
                 tracing::info!(
-                    "resuming '{}' at {:.0}s",
+                    "resuming '{}' at {:.0}s (auto_resume={})",
                     track.title,
-                    resume_pos
+                    resume_pos,
+                    auto_resume,
                 );
                 match self.start_playback(track).await {
                     Ok(()) => {
-                        // Start paused so it doesn't blast on startup
-                        self.sink.pause();
-                        let mut inner = self.inner.lock().await;
-                        inner.status = PlayStatus::Paused;
-                        drop(inner);
+                        // Seek to saved position
+                        if resume_pos > 1.0 {
+                            if let Err(e) = self
+                                .sink
+                                .try_seek(Duration::from_secs_f32(resume_pos))
+                            {
+                                tracing::warn!("seek to resume position failed: {e}");
+                            }
+                        }
+
+                        if auto_resume {
+                            // Graceful restart — keep playing
+                            tracing::info!("auto-resuming playback");
+                        } else {
+                            // Normal startup — start paused so it doesn't blast
+                            self.sink.pause();
+                            let mut inner = self.inner.lock().await;
+                            inner.status = PlayStatus::Paused;
+                            drop(inner);
+                        }
                         self.broadcast_now_playing().await;
                     }
                     Err(e) => {
@@ -1335,8 +1393,13 @@ impl Player {
     // ── Likes & Downloads ────────────────────────────────────────────────
 
     /// Get a reference to the storage layer
-    pub fn storage(&self) -> &MonoStorage {
+    pub fn storage(&self) -> &Arc<MonoStorage> {
         &self.storage
+    }
+
+    /// Get a reference to the HTTP client
+    pub fn client(&self) -> &Arc<MonoClient> {
+        &self.client
     }
 
     /// Toggle like on a track. Returns new liked state.

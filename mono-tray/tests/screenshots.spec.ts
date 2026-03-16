@@ -59,12 +59,16 @@ test.describe('Mono Tray Screenshots', () => {
   }
 
   test('now-playing view', async ({ page }) => {
-    await setup(page, 598);
+    await setup(page, 616);
     // Wait for track title to populate (not "Not Playing")
     await page.locator('#title').filter({ hasNotText: 'Not Playing' }).waitFor({ timeout: 10000 });
-    // Wait for cover art to load (best-effort — upstream API may be slow)
-    await page.locator('#album-art[src]:not([src=""])').waitFor({ timeout: 15000 }).catch(() => {});
-    await page.waitForTimeout(500);
+    // Wait for cover art to fully load (src set, class applied, image decoded)
+    await page.locator('#album-art.loaded').waitFor({ timeout: 30000 });
+    await page.waitForFunction(() => {
+      const img = document.getElementById('album-art') as HTMLImageElement;
+      return img && img.complete && img.naturalWidth > 0;
+    }, { timeout: 15000 });
+    await page.waitForTimeout(300);
     await page.screenshot({ omitBackground: true, path: `${SCREENSHOT_DIR}/now-playing.png` });
   });
 

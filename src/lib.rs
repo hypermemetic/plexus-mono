@@ -4,6 +4,7 @@
 //! track metadata, album listings, artist info, search, lyrics,
 //! recommendations, and cover art.
 
+pub mod audio_server;
 pub mod client;
 pub mod hub;
 pub mod player;

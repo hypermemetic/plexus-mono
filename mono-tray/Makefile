@@ -32,12 +32,20 @@ app: frontend
 
 # Build, install to ~/Applications, kill old instance, and launch
 run: install-user
-	-pkill -f 'Mono Tray' 2>/dev/null; sleep 0.5
+	-pkill -f 'Mono Tray' 2>/dev/null; \
+	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
+		pgrep -f 'Mono Tray' >/dev/null 2>&1 || break; \
+		sleep 0.1; \
+	done
 	open ~/Applications/Mono\ Tray.app
 
 # Kill and relaunch installed app (no rebuild)
 restart:
-	-pkill -f 'Mono Tray' 2>/dev/null; sleep 0.5
+	-pkill -f 'Mono Tray' 2>/dev/null; \
+	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
+		pgrep -f 'Mono Tray' >/dev/null 2>&1 || break; \
+		sleep 0.1; \
+	done
 	open ~/Applications/Mono\ Tray.app
 
 # Install to /Applications (requires sudo)
@@ -53,9 +61,13 @@ install-user: app
 backend:
 	cd .. && cargo run --bin plexus-mono
 
-# Kill existing backend and restart
+# Kill existing backend and restart (polls for exit, max 2s)
 backend-restart:
-	-lsof -ti :4448 | xargs kill 2>/dev/null; sleep 0.5
+	-lsof -ti :4448 | xargs kill 2>/dev/null; \
+	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
+		lsof -ti :4448 >/dev/null 2>&1 || break; \
+		sleep 0.1; \
+	done
 	cd .. && cargo run --bin plexus-mono
 
 # Full cycle: restart backend, regenerate clients, build & run app
@@ -81,7 +93,11 @@ full:
 		PROC_EPOCH=$$(date -j -f "%a %b %d %T %Y" "$$PROC_START" +%s 2>/dev/null || echo 0); \
 		if [ "$$BIN_MOD" -gt "$$PROC_EPOCH" ]; then \
 			echo "Binary newer than running server — restarting..."; \
-			kill $$PID 2>/dev/null; sleep 0.5; \
+			kill $$PID 2>/dev/null; \
+			for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
+				kill -0 $$PID 2>/dev/null || break; \
+				sleep 0.1; \
+			done; \
 			"$(BACKEND_BIN)" & \
 			synapse-cc wait music --url ws://127.0.0.1:4448 --timeout 15; \
 		else \

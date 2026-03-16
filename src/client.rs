@@ -54,6 +54,8 @@ impl MonoClient {
             client: reqwest::Client::builder()
                 .user_agent("plexus-mono/0.1.0")
                 .timeout(std::time::Duration::from_secs(15))
+                .pool_idle_timeout(std::time::Duration::from_secs(30))
+                .pool_max_idle_per_host(4)
                 .build()
                 .expect("failed to build reqwest client"),
             base_url: base_url.into(),

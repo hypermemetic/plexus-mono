@@ -65,6 +65,7 @@ const queueBtn = document.getElementById('queue-btn')!;
 const queueInfo = document.getElementById('queue-info')!;
 const openLink = document.getElementById('open-link') as HTMLAnchorElement;
 const disconnectOverlay = document.getElementById('disconnect-overlay')!;
+const connDot = document.getElementById('conn-dot')!;
 
 // Nav elements
 const navBack = document.getElementById('nav-back')!;
@@ -98,6 +99,31 @@ let searchDebounce: ReturnType<typeof setTimeout> | null = null;
 let activeSearchGen: AsyncGenerator | null = null;
 let browseScrollTop = 0;
 let lastQueueLength = 0;
+
+// --- Client-side position interpolation (survives disconnects) ---
+let interpPositionSecs = 0;
+let interpLastUpdate = 0; // Date.now() of last server update
+let interpTimerId: ReturnType<typeof setInterval> | null = null;
+
+function startInterpolation(): void {
+  if (interpTimerId) return;
+  interpTimerId = setInterval(() => {
+    if (!isPlaying || scrubbing || currentDurationSecs <= 0) return;
+    // Use failover audio position when active, otherwise interpolate
+    const pos = audioFailoverActive
+      ? Math.min(audioFailoverEl.currentTime, currentDurationSecs)
+      : Math.min(interpPositionSecs + (Date.now() - interpLastUpdate) / 1000, currentDurationSecs);
+    const pct = (pos / currentDurationSecs) * 100;
+    progressFill.style.width = `${pct}%`;
+    progressThumb.style.left = `${pct}%`;
+    timeCurrent.textContent = formatTime(pos);
+  }, 250);
+}
+
+function syncPosition(serverPos: number): void {
+  interpPositionSecs = serverPos;
+  interpLastUpdate = Date.now();
+}
 let searchKind: 'tracks' | 'albums' | 'artists' = 'tracks';
 let lastEnterTime = 0;
 let researchResult: { name: string; tracks: ResearchTrack[] } | null = null;
@@ -135,6 +161,125 @@ let peakBufferFilled = 0;
 let silenceSince: number | null = null;
 let waveformAnimId = 0;
 let lastWaveformTrackId: number | null = null;
+
+// --- Audio failover state ---
+// Hidden <audio> element buffers the current track for instant takeover on disconnect
+const AUDIO_HTTP_PORT = 4450;
+const audioFailoverEl = new Audio();
+audioFailoverEl.preload = 'auto';
+audioFailoverEl.muted = true;
+let audioBufferTrackId: number | null = null;
+let audioFetchAbort: AbortController | null = null;
+let audioFailoverActive = false;
+let audioFailoverBlobUrl: string | null = null;
+
+// Next-track prefetch: buffer the next queued track so track transitions are seamless too
+const audioNextEl = new Audio();
+audioNextEl.preload = 'auto';
+audioNextEl.muted = true;
+let audioNextTrackId: number | null = null;
+let audioNextBlobUrl: string | null = null;
+let audioNextFetchAbort: AbortController | null = null;
+
+/** Buffer the full audio file for a track from the HTTP audio proxy */
+function bufferTrackAudio(trackId: number): void {
+  // Abort previous fetch
+  if (audioFetchAbort) audioFetchAbort.abort();
+  audioFetchAbort = new AbortController();
+
+  // Revoke old blob URL
+  if (audioFailoverBlobUrl) {
+    URL.revokeObjectURL(audioFailoverBlobUrl);
+    audioFailoverBlobUrl = null;
+  }
+  audioBufferTrackId = trackId;
+
+  const url = `http://127.0.0.1:${AUDIO_HTTP_PORT}/audio/${trackId}?quality=LOSSLESS`;
+  fetch(url, { signal: audioFetchAbort.signal })
+    .then(resp => {
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      return resp.blob();
+    })
+    .then(blob => {
+      if (audioBufferTrackId !== trackId) return; // track changed during fetch
+      audioFailoverBlobUrl = URL.createObjectURL(blob);
+      audioFailoverEl.src = audioFailoverBlobUrl;
+      // Sync to current interpolated position
+      const elapsed = (Date.now() - interpLastUpdate) / 1000;
+      const pos = Math.min(interpPositionSecs + elapsed, currentDurationSecs);
+      audioFailoverEl.currentTime = pos;
+      console.log(`Audio buffer ready for track ${trackId} (${(blob.size / 1024 / 1024).toFixed(1)}MB)`);
+      // Prefetch next queued track
+      prefetchNextTrack();
+    })
+    .catch(err => {
+      if (err.name !== 'AbortError') {
+        console.warn('Audio buffer fetch failed:', err);
+      }
+    });
+}
+
+/** Prefetch the next track in queue for seamless failover transitions */
+async function prefetchNextTrack(): Promise<void> {
+  try {
+    for await (const event of player.queueGet()) {
+      if (event.type === 'queue') {
+        const q = event as MonoEventQueue;
+        const nextTrack = q.tracks[0]; // first in queue = next up
+        if (!nextTrack || nextTrack.id === audioNextTrackId) return;
+
+        // Abort previous next-track fetch
+        if (audioNextFetchAbort) audioNextFetchAbort.abort();
+        audioNextFetchAbort = new AbortController();
+        if (audioNextBlobUrl) { URL.revokeObjectURL(audioNextBlobUrl); audioNextBlobUrl = null; }
+
+        audioNextTrackId = nextTrack.id;
+        const url = `http://127.0.0.1:${AUDIO_HTTP_PORT}/audio/${nextTrack.id}?quality=LOSSLESS`;
+        const resp = await fetch(url, { signal: audioNextFetchAbort.signal });
+        if (!resp.ok) return;
+        const blob = await resp.blob();
+        if (audioNextTrackId !== nextTrack.id) return;
+        audioNextBlobUrl = URL.createObjectURL(blob);
+        audioNextEl.src = audioNextBlobUrl;
+        console.log(`Next track buffer ready for ${nextTrack.id} (${(blob.size / 1024 / 1024).toFixed(1)}MB)`);
+      }
+    }
+  } catch { /* best effort */ }
+}
+
+/** Activate client-side audio playback on disconnect */
+function activateFailoverAudio(): void {
+  if (audioFailoverActive || !audioFailoverBlobUrl) return;
+  // Seek to interpolated position
+  const elapsed = (Date.now() - interpLastUpdate) / 1000;
+  const pos = Math.min(interpPositionSecs + elapsed, currentDurationSecs);
+  audioFailoverEl.currentTime = pos;
+  audioFailoverEl.muted = false;
+  audioFailoverEl.volume = parseInt(volumeSlider.value) / 100;
+  audioFailoverEl.play().catch(err => console.warn('Failover play failed:', err));
+  audioFailoverActive = true;
+  console.log(`Audio failover activated at ${pos.toFixed(1)}s`);
+}
+
+/** Deactivate client audio and return the position for server sync */
+function deactivateFailoverAudio(): number {
+  const pos = audioFailoverEl.currentTime;
+  audioFailoverEl.muted = true;
+  audioFailoverEl.pause();
+  audioFailoverActive = false;
+  console.log(`Audio failover deactivated at ${pos.toFixed(1)}s`);
+  return pos;
+}
+
+// Sync standby audio position every 5s to stay close to server
+setInterval(() => {
+  if (audioFailoverActive || !audioFailoverBlobUrl || !isPlaying) return;
+  const elapsed = (Date.now() - interpLastUpdate) / 1000;
+  const pos = Math.min(interpPositionSecs + elapsed, currentDurationSecs);
+  if (Math.abs(audioFailoverEl.currentTime - pos) > 1) {
+    audioFailoverEl.currentTime = pos;
+  }
+}, 5000);
 
 // --- Notifications ---
 async function initNotifications(): Promise<void> {
@@ -447,6 +592,7 @@ function updateUI(np: MonoEventNowPlaying): void {
   }
 
   currentDurationSecs = np.durationSecs;
+  syncPosition(np.positionSecs);
   if (!scrubbing) {
     const pct = np.durationSecs > 0 ? (np.positionSecs / np.durationSecs) * 100 : 0;
     progressFill.style.width = `${pct}%`;
@@ -456,6 +602,7 @@ function updateUI(np: MonoEventNowPlaying): void {
   timeTotal.textContent = formatTime(np.durationSecs);
 
   updatePlayPauseIcon(np.status);
+  startInterpolation();
 
   if (!volumeSlider.matches(':active')) {
     volumeSlider.value = String(Math.round(np.volume * 100));
@@ -495,6 +642,19 @@ function updateUI(np: MonoEventNowPlaying): void {
     currentTrackId = np.trackId;
     fetchCoverArt(np.trackId);
     notifyTrackChange(np);
+    // If next-track buffer matches, promote it instead of re-fetching
+    if (np.trackId === audioNextTrackId && audioNextBlobUrl) {
+      if (audioFailoverBlobUrl) URL.revokeObjectURL(audioFailoverBlobUrl);
+      audioFailoverBlobUrl = audioNextBlobUrl;
+      audioFailoverEl.src = audioFailoverBlobUrl;
+      audioBufferTrackId = np.trackId;
+      audioNextBlobUrl = null;
+      audioNextTrackId = null;
+      console.log(`Promoted next-track buffer for ${np.trackId}`);
+      prefetchNextTrack();
+    } else {
+      bufferTrackAudio(np.trackId);
+    }
   } else if (!np.trackId) {
     currentTrackId = null;
     albumArt.classList.remove('loaded');
@@ -1557,6 +1717,16 @@ queueBtn.addEventListener('click', () => {
 
 // --- Transport controls ---
 btnPlayPause.addEventListener('click', async () => {
+  if (audioFailoverActive) {
+    if (audioFailoverEl.paused) {
+      audioFailoverEl.play().catch(() => {});
+      updatePlayPauseIcon('playing');
+    } else {
+      audioFailoverEl.pause();
+      updatePlayPauseIcon('paused');
+    }
+    return;
+  }
   try {
     const gen = isPlaying ? player.pause() : player.resume();
     for await (const _ of gen) { break; }
@@ -1577,6 +1747,10 @@ btnNext.addEventListener('click', async () => {
 
 // Volume control with debounce
 volumeSlider.addEventListener('input', () => {
+  if (audioFailoverActive) {
+    audioFailoverEl.volume = parseInt(volumeSlider.value) / 100;
+    return;
+  }
   if (volumeDebounce) clearTimeout(volumeDebounce);
   volumeDebounce = setTimeout(async () => {
     const level = parseInt(volumeSlider.value) / 100;
@@ -2251,8 +2425,24 @@ async function streamNowPlaying(): Promise<void> {
   while (true) {
     try {
       await rpc.connect();
-      disconnectOverlay.classList.add('hidden');
+      connDot.className = 'connected';
+      connDot.title = 'Connected';
       loadLikedSet(); // reload liked set on reconnect
+
+      // On reconnect: deactivate failover audio and sync server to client position
+      if (audioFailoverActive) {
+        const clientPos = deactivateFailoverAudio();
+        (async () => {
+          try { for await (const _ of player.seek(clientPos)) { /* drain */ } } catch { /* best effort */ }
+        })();
+      } else if (isPlaying && interpLastUpdate > 0 && currentDurationSecs > 0) {
+        const elapsed = (Date.now() - interpLastUpdate) / 1000;
+        const clientPos = Math.min(interpPositionSecs + elapsed, currentDurationSecs);
+        // Fire-and-forget seek to sync server with client's position
+        (async () => {
+          try { for await (const _ of player.seek(clientPos)) { /* drain */ } } catch { /* best effort */ }
+        })();
+      }
 
       for await (const event of player.nowPlaying()) {
         if (event.type === 'now_playing') {
@@ -2263,10 +2453,30 @@ async function streamNowPlaying(): Promise<void> {
       console.error('Stream error:', err);
     }
 
-    // Disconnected — show overlay and retry
-    disconnectOverlay.classList.remove('hidden');
+    // Disconnected — activate failover audio if we were playing
+    connDot.className = 'disconnected';
+    connDot.title = 'Disconnected — reconnecting...';
     rpc.disconnect();
     cachedPlaylists = null;
+    if (isPlaying && audioFailoverBlobUrl) {
+      activateFailoverAudio();
+    }
+
+    // Grace period: 6 × 500ms = 3s of rapid retries
+    let reconnected = false;
+    for (let i = 0; i < 6; i++) {
+      await new Promise(r => setTimeout(r, 500));
+      try {
+        await rpc.connect();
+        reconnected = true;
+        break;
+      } catch {
+        rpc.disconnect();
+      }
+    }
+    if (reconnected) continue;
+
+    // Slow retry
     await new Promise(r => setTimeout(r, 2000));
   }
 }
@@ -2317,7 +2527,7 @@ streamAudioPeaks();
 // --- JS hover polyfill (CSS :hover doesn't fire in NSPanel WebView) ---
 // Native global mouseMoved monitor in Rust emits coordinates via Tauri events.
 // We use elementFromPoint to resolve the hovered element.
-const hoverSelectors = '.nav-btn, .control-btn, .list-row, .row-action, #queue-btn, #open-link, .crumb, #progress-bar, .action-btn, .new-playlist-row, .save-queue-btn, .search-tab, .clickable-meta, #like-btn, #np-download-btn, #history-btn, .liked-songs-row';
+const hoverSelectors = '.nav-btn, .control-btn, .list-row, .row-action, #queue-btn, #open-link, .crumb, #progress-bar, .action-btn, .new-playlist-row, .save-queue-btn, .search-tab, .clickable-meta, #like-btn, #np-download-btn, #history-btn, .liked-songs-row, #conn-dot';
 let currentHover: Element | null = null;
 
 listen<{ x: number; y: number }>('mono-tray://mousemove', (event) => {

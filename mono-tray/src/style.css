@@ -195,41 +195,36 @@ body {
   display: none;
 }
 
-/* Disconnect overlay */
-#disconnect-overlay {
-  position: absolute;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.85);
-  z-index: 100;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius);
-  backdrop-filter: blur(4px);
+/* Disconnect overlay (kept hidden — replaced by conn-dot) */
+#disconnect-overlay { display: none; }
+#disconnect-overlay.hidden { display: none; }
+
+/* Connection status dot in footer */
+#conn-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: background 0.3s ease, transform 0.15s ease;
 }
 
-#disconnect-overlay.hidden {
-  display: none;
+#conn-dot.connected {
+  background: #4ade80;
 }
 
-.disconnect-content {
-  text-align: center;
+#conn-dot.disconnected {
+  background: #f87171;
+  animation: pulse-dot 1.5s ease-in-out infinite;
 }
 
-.disconnect-icon {
-  font-size: 32px;
-  margin-bottom: 8px;
+#conn-dot.hover {
+  transform: scale(2);
+  cursor: default;
 }
 
-.disconnect-text {
-  font-size: 16px;
-  font-weight: 600;
-}
-
-.disconnect-sub {
-  font-size: 12px;
-  color: var(--text-secondary);
-  margin-top: 4px;
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
 }
 
 /* Album art */
@@ -556,10 +551,14 @@ body {
 #detail-tracks {
   display: flex;
   flex-direction: column;
+  overflow-y: auto;
+  max-height: 420px;
+  scrollbar-width: none;
 }
 
 #browse-list::-webkit-scrollbar,
-#queue-tracks::-webkit-scrollbar {
+#queue-tracks::-webkit-scrollbar,
+#detail-tracks::-webkit-scrollbar {
   display: none;
 }
 

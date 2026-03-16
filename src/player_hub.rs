@@ -33,6 +33,11 @@ impl PlayerHub {
         Self { player, playlist }
     }
 
+    /// Access the underlying Player (for signal handlers, etc.)
+    pub fn player(&self) -> Arc<Player> {
+        self.player.clone()
+    }
+
     /// Return child activation summaries for schema discovery
     pub fn plugin_children(&self) -> Vec<ChildSummary> {
         vec![ChildSummary {
