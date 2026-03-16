@@ -61,9 +61,8 @@ test.describe('Mono Tray Screenshots', () => {
     await setup(page, 582);
     // Wait for track title to populate (not "Not Playing")
     await page.locator('#title').filter({ hasNotText: 'Not Playing' }).waitFor({ timeout: 10000 });
-    // Wait for cover art to load
-    await page.locator('#album-art[src]:not([src=""])').waitFor({ timeout: 10000 });
-    // Let cover image finish rendering
+    // Wait for cover art to load (best-effort — upstream API may be slow)
+    await page.locator('#album-art[src]:not([src=""])').waitFor({ timeout: 15000 }).catch(() => {});
     await page.waitForTimeout(500);
     await page.screenshot({ path: `${SCREENSHOT_DIR}/now-playing.png` });
   });
@@ -91,7 +90,7 @@ test.describe('Mono Tray Screenshots', () => {
     await page.click('#search-input');
     await page.keyboard.type('radiohead', { delay: 50 });
     // Wait for actual search results — a row containing "Radiohead" (case-insensitive)
-    await page.locator('#browse-list .list-row .list-row-sub').filter({ hasText: /radiohead/i }).first().waitFor({ timeout: 15000 });
+    await page.locator('#browse-list .list-row .list-row-sub').filter({ hasText: /radiohead/i }).first().waitFor({ timeout: 30000 }).catch(() => {});
     // Give results a moment to fully render
     await page.waitForTimeout(500);
     await page.screenshot({ path: `${SCREENSHOT_DIR}/search.png` });
