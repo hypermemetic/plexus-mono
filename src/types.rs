@@ -310,6 +310,18 @@ pub enum MonoEvent {
         outcome: ListenOutcome,
     },
 
+    /// Result of a sanity check
+    SanityResult {
+        /// Name of the check (ping, track, search, stream, cover)
+        check: String,
+        /// Whether the check passed
+        passed: bool,
+        /// Duration in milliseconds
+        duration_ms: u64,
+        /// Detail message or error
+        message: String,
+    },
+
     /// Error from any method
     Error {
         /// Human-readable error description

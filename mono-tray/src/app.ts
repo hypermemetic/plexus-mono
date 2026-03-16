@@ -1,7 +1,7 @@
 import { PlexusRpcClient } from '../generated/transport';
 import { createPlayerClient } from '../generated/player/client';
 import { createPlayerPlaylistClient } from '../generated/player/playlist/client';
-import { createMonoClient } from '../generated/mono/client';
+import { createMonochromeClient } from '../generated/monochrome/client';
 import type { MonoEvent, MonoEventNowPlaying, MonoEventCover, MonoEventPlaylistInfo, MonoEventSearchTrack, MonoEventSearchAlbum, MonoEventSearchArtist, MonoEventAlbum, MonoEventAlbumTrack, MonoEventArtist, MonoEventQueue, QueuedTrack } from '../generated/player/types';
 import { createClaudecodeClient } from '../generated/substrate/claudecode/client';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
@@ -160,14 +160,14 @@ initNotifications();
 
 // --- RPC client ---
 const rpc = new PlexusRpcClient({
-  backend: 'monochrome',
+  backend: 'music',
   url: 'ws://127.0.0.1:4448',
   debug: false,
 });
 
 const player = createPlayerClient(rpc);
 const playlist = createPlayerPlaylistClient(rpc);
-const mono = createMonoClient(rpc);
+const mono = createMonochromeClient(rpc);
 
 // Substrate RPC client for AI research (claudecode)
 const substrateRpc = new PlexusRpcClient({

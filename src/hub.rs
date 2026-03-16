@@ -9,29 +9,34 @@ use async_trait::async_trait;
 use futures::Stream;
 use std::sync::Arc;
 
+use plexus_core::plexus::schema::ChildSummary;
 use plexus_core::plexus::{ChildRouter, PlexusError, PlexusStream};
 use plexus_core::Activation;
 
 use crate::client::MonoClient;
+use crate::sanity::SanityHub;
 use crate::types::{MonoEvent, SearchKind};
 
 /// Monochrome music API activation — stateless API proxy.
 #[derive(Clone)]
 pub struct MonoHub {
     client: Arc<MonoClient>,
+    sanity: SanityHub,
 }
 
 impl MonoHub {
     /// Create a hub targeting the default Monochrome API instance.
     pub async fn new() -> Self {
         let client = Arc::new(MonoClient::default_instance());
-        Self { client }
+        let sanity = SanityHub::new(client.clone());
+        Self { client, sanity }
     }
 
     /// Create a hub targeting a specific API base URL (no trailing slash).
     pub async fn with_url(base_url: impl Into<String>) -> Self {
         let client = Arc::new(MonoClient::new(base_url));
-        Self { client }
+        let sanity = SanityHub::new(client.clone());
+        Self { client, sanity }
     }
 
     /// Get a shared reference to the underlying MonoClient.
@@ -39,9 +44,13 @@ impl MonoHub {
         self.client.clone()
     }
 
-    /// No children — leaf hub for schema compatibility
-    pub fn plugin_children(&self) -> Vec<plexus_core::plexus::schema::ChildSummary> {
-        vec![]
+    /// Child activations for schema discovery
+    pub fn plugin_children(&self) -> Vec<ChildSummary> {
+        vec![ChildSummary {
+            namespace: "sanity".into(),
+            description: "Diagnostic checks for the Monochrome API".into(),
+            hash: String::new(),
+        }]
     }
 }
 
@@ -295,7 +304,10 @@ impl ChildRouter for MonoHub {
         self.call(method, params).await
     }
 
-    async fn get_child(&self, _name: &str) -> Option<Box<dyn ChildRouter>> {
-        None
+    async fn get_child(&self, name: &str) -> Option<Box<dyn ChildRouter>> {
+        match name {
+            "sanity" => Some(Box::new(self.sanity.clone())),
+            _ => None,
+        }
     }
 }

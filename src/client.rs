@@ -64,6 +64,11 @@ impl MonoClient {
         Self::new("https://api.monochrome.tf")
     }
 
+    /// Get the base URL for diagnostic/sanity checks.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     async fn get(&self, path: &str) -> Result<Value, String> {
         let url = format!("{}{}", self.base_url, path);
         tracing::debug!("GET {}", url);

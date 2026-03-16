@@ -104,14 +104,14 @@ async fn run_server(args: Args) -> anyhow::Result<()> {
 
     // Wrap in a DynamicHub named "monochrome" with two sibling activations
     let hub = Arc::new(
-        DynamicHub::new("monochrome")
+        DynamicHub::new("music")
             .register_hub(mono_hub)       // hub — supports recursive schema
             .register_hub(player_hub),    // hub — has playlist child
     );
 
     tracing::info!("plexus-mono initialized");
-    tracing::info!("  Hub:         monochrome");
-    tracing::info!("  Activations: monochrome (API), player (playback)");
+    tracing::info!("  Hub:         music");
+    tracing::info!("  Activations: monochrome (API), player (playback), sanity (diagnostics)");
     tracing::info!("  Version:     {}", env!("CARGO_PKG_VERSION"));
 
     // Configure transport
@@ -145,23 +145,27 @@ async fn run_server(args: Args) -> anyhow::Result<()> {
         tracing::info!("");
         tracing::info!("Usage examples:");
         tracing::info!(
-            "  synapse -P {} monochrome monochrome search --query 'radiohead'",
+            "  synapse -P {} music monochrome search --query 'radiohead'",
             args.port
         );
         tracing::info!(
-            "  synapse -P {} monochrome monochrome track --id 12345",
+            "  synapse -P {} music monochrome track --id 12345",
             args.port
         );
         tracing::info!(
-            "  synapse -P {} monochrome player play --id 55391801",
+            "  synapse -P {} music player play --id 55391801",
             args.port
         );
         tracing::info!(
-            "  synapse -P {} monochrome player now_playing",
+            "  synapse -P {} music player now_playing",
             args.port
         );
         tracing::info!(
-            "  synapse -P {} monochrome player playlist list",
+            "  synapse -P {} music player playlist list",
+            args.port
+        );
+        tracing::info!(
+            "  synapse -P {} music monochrome sanity all",
             args.port
         );
     }

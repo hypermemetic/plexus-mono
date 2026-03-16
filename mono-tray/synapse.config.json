@@ -1,7 +1,7 @@
 {
   "schema": "1.1",
   "language": "typescript",
-  "backend": "monochrome",
+  "backend": "music",
   "url": "ws://127.0.0.1:4448",
   "packageManager": "bun",
   "targets": {

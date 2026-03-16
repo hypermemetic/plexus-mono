@@ -59,10 +59,10 @@ backend-restart:
 	cd .. && cargo run --bin plexus-mono
 
 # Full cycle: restart backend, regenerate clients, build & run app
-# Use: make full FORCE_CODEGEN=1 to force client regeneration
-CODEGEN_FLAGS =
-ifdef FORCE_CODEGEN
+# Codegen always forces by default; use SKIP_FORCE=1 to use cache
 CODEGEN_FLAGS = --force
+ifdef SKIP_FORCE
+CODEGEN_FLAGS =
 endif
 
 BACKEND_BIN = $(abspath ../target/debug/plexus-mono)
@@ -74,7 +74,7 @@ full:
 	if [ -z "$$PID" ]; then \
 		echo "Server not running — starting..."; \
 		"$(BACKEND_BIN)" & \
-		synapse-cc wait monochrome --url ws://127.0.0.1:4448 --timeout 15; \
+		synapse-cc wait music --url ws://127.0.0.1:4448 --timeout 15; \
 	else \
 		BIN_MOD=$$(stat -f %m "$(BACKEND_BIN)" 2>/dev/null || echo 0); \
 		PROC_START=$$(ps -p $$PID -o lstart= 2>/dev/null); \
@@ -83,7 +83,7 @@ full:
 			echo "Binary newer than running server — restarting..."; \
 			kill $$PID 2>/dev/null; sleep 0.5; \
 			"$(BACKEND_BIN)" & \
-			synapse-cc wait monochrome --url ws://127.0.0.1:4448 --timeout 15; \
+			synapse-cc wait music --url ws://127.0.0.1:4448 --timeout 15; \
 		else \
 			echo "Server already running with latest binary."; \
 		fi; \
