@@ -299,6 +299,38 @@ struct PlayerInner {
     listen_started_at: Option<String>,
 }
 
+/// Circular buffer of recent audio peak values for waveform history.
+struct PeakHistory {
+    buffer: Vec<f32>,
+    capacity: usize,
+    track_id: Option<u64>,
+}
+
+impl PeakHistory {
+    fn new(capacity: usize) -> Self {
+        Self {
+            buffer: Vec::with_capacity(capacity),
+            capacity,
+            track_id: None,
+        }
+    }
+
+    fn push(&mut self, peak: f32, track_id: Option<u64>) {
+        if track_id != self.track_id {
+            self.buffer.clear();
+            self.track_id = track_id;
+        }
+        if self.buffer.len() >= self.capacity {
+            self.buffer.remove(0);
+        }
+        self.buffer.push(peak);
+    }
+
+    fn snapshot(&self) -> (Option<u64>, Vec<f32>) {
+        (self.track_id, self.buffer.clone())
+    }
+}
+
 /// Audio playback engine with queue and controls
 pub struct Player {
     sink: Arc<rodio::Player>,
@@ -309,6 +341,7 @@ pub struct Player {
     now_playing_rx: watch::Receiver<NowPlaying>,
     client: Arc<MonoClient>,
     audio_peak: Arc<AtomicU32>,
+    peak_history: Arc<Mutex<PeakHistory>>,
     // Dropping this signals the audio thread to exit
     _shutdown_tx: std::sync::mpsc::Sender<()>,
 }
@@ -352,7 +385,25 @@ impl Player {
             now_playing_rx,
             client,
             audio_peak: Arc::new(AtomicU32::new(0)),
+            peak_history: Arc::new(Mutex::new(PeakHistory::new(2048))),
             _shutdown_tx: shutdown_tx,
+        });
+
+        // Peak history collector (~30fps, mirrors LevelMonitor output into buffer)
+        let weak = Arc::downgrade(&player);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(33)).await;
+                let Some(this) = weak.upgrade() else { break };
+                let bits = this.audio_peak.load(Ordering::Relaxed);
+                let peak = f32::from_bits(bits);
+                let track_id = {
+                    let inner = this.inner.lock().await;
+                    inner.current_track.as_ref().map(|t| t.id)
+                };
+                let mut hist = this.peak_history.lock().await;
+                hist.push(peak, track_id);
+            }
         });
 
         // Position reporter (~1s updates while playing)
@@ -1170,6 +1221,11 @@ impl Player {
     /// Get a handle to the live audio peak atomic (updated at ~30fps by LevelMonitor)
     pub fn audio_peak_handle(&self) -> Arc<AtomicU32> {
         self.audio_peak.clone()
+    }
+
+    /// Get a snapshot of the buffered peak history for waveform seeding.
+    pub async fn peak_history(&self) -> (Option<u64>, Vec<f32>) {
+        self.peak_history.lock().await.snapshot()
     }
 
     pub fn subscribe_now_playing(&self) -> watch::Receiver<NowPlaying> {

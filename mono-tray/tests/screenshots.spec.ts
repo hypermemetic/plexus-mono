@@ -32,7 +32,8 @@ const TAURI_MOCK = `
 `;
 
 const FORCE_VISIBLE_CSS = `
-  html, body { background: #111 !important; }
+  html, body { background: transparent !important; }
+  body { padding-top: 16px !important; }
   #app {
     opacity: 1 !important;
     transform: none !important;
@@ -58,17 +59,17 @@ test.describe('Mono Tray Screenshots', () => {
   }
 
   test('now-playing view', async ({ page }) => {
-    await setup(page, 582);
+    await setup(page, 598);
     // Wait for track title to populate (not "Not Playing")
     await page.locator('#title').filter({ hasNotText: 'Not Playing' }).waitFor({ timeout: 10000 });
     // Wait for cover art to load (best-effort — upstream API may be slow)
     await page.locator('#album-art[src]:not([src=""])').waitFor({ timeout: 15000 }).catch(() => {});
     await page.waitForTimeout(500);
-    await page.screenshot({ path: `${SCREENSHOT_DIR}/now-playing.png` });
+    await page.screenshot({ omitBackground: true, path: `${SCREENSHOT_DIR}/now-playing.png` });
   });
 
   test('browse view with playlists', async ({ page }) => {
-    await setup(page, 600);
+    await setup(page, 616);
     // Wait for now-playing data first (confirms WS is connected)
     await page.locator('#title').filter({ hasNotText: 'Not Playing' }).waitFor({ timeout: 10000 });
 
@@ -76,11 +77,11 @@ test.describe('Mono Tray Screenshots', () => {
     // Wait for playlist rows to appear in the browse list
     await page.locator('#browse-list .list-row').first().waitFor({ timeout: 10000 });
     await page.waitForTimeout(300);
-    await page.screenshot({ path: `${SCREENSHOT_DIR}/browse.png` });
+    await page.screenshot({ omitBackground: true, path: `${SCREENSHOT_DIR}/browse.png` });
   });
 
   test('search results', async ({ page }) => {
-    await setup(page, 600);
+    await setup(page, 616);
     await page.locator('#title').filter({ hasNotText: 'Not Playing' }).waitFor({ timeout: 10000 });
 
     await page.click('#nav-action');
@@ -90,36 +91,37 @@ test.describe('Mono Tray Screenshots', () => {
     await page.click('#search-input');
     await page.keyboard.type('radiohead', { delay: 50 });
     // Wait for actual search results — a row containing "Radiohead" (case-insensitive)
-    await page.locator('#browse-list .list-row .list-row-sub').filter({ hasText: /radiohead/i }).first().waitFor({ timeout: 30000 }).catch(() => {});
-    // Give results a moment to fully render
+    await page.locator('#browse-list .list-row .list-row-sub').filter({ hasText: /radiohead/i }).first().waitFor({ timeout: 30000 });
+    // Ensure multiple results rendered
+    await expect(page.locator('#browse-list .list-row')).not.toHaveCount(0);
     await page.waitForTimeout(500);
-    await page.screenshot({ path: `${SCREENSHOT_DIR}/search.png` });
+    await page.screenshot({ omitBackground: true, path: `${SCREENSHOT_DIR}/search.png` });
   });
 
   test('queue view', async ({ page }) => {
-    await setup(page, 600);
+    await setup(page, 616);
     await page.locator('#title').filter({ hasNotText: 'Not Playing' }).waitFor({ timeout: 10000 });
 
     await page.click('#queue-btn');
     // Wait for queue track rows to appear
     await page.locator('#queue-tracks .list-row').first().waitFor({ timeout: 10000 });
     await page.waitForTimeout(300);
-    await page.screenshot({ path: `${SCREENSHOT_DIR}/queue.png` });
+    await page.screenshot({ omitBackground: true, path: `${SCREENSHOT_DIR}/queue.png` });
   });
 
   test('history view', async ({ page }) => {
-    await setup(page, 600);
+    await setup(page, 616);
     await page.locator('#title').filter({ hasNotText: 'Not Playing' }).waitFor({ timeout: 10000 });
 
     await page.click('#history-btn');
     // Wait for history track rows to appear
     await page.locator('#history-tracks .list-row').first().waitFor({ timeout: 10000 });
     await page.waitForTimeout(300);
-    await page.screenshot({ path: `${SCREENSHOT_DIR}/history.png` });
+    await page.screenshot({ omitBackground: true, path: `${SCREENSHOT_DIR}/history.png` });
   });
 
   test('playlist detail', async ({ page }) => {
-    await setup(page, 600);
+    await setup(page, 616);
     await page.locator('#title').filter({ hasNotText: 'Not Playing' }).waitFor({ timeout: 10000 });
 
     await page.click('#nav-action');
@@ -131,6 +133,6 @@ test.describe('Mono Tray Screenshots', () => {
     // Wait for detail tracks to load
     await page.locator('#detail-tracks .list-row').first().waitFor({ timeout: 10000 });
     await page.waitForTimeout(300);
-    await page.screenshot({ path: `${SCREENSHOT_DIR}/playlist-detail.png` });
+    await page.screenshot({ omitBackground: true, path: `${SCREENSHOT_DIR}/playlist-detail.png` });
   });
 });

@@ -473,6 +473,19 @@ impl PlayerHub {
         }
     }
 
+    /// Get buffered waveform peak history for instant rendering on connect
+    #[plexus_macros::hub_method(
+        description = "Get buffered peak history (~2048 samples at 30fps ≈ 68s) for instant waveform rendering"
+    )]
+    pub async fn waveform(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let (track_id, peaks) = self.player.peak_history().await;
+        stream! {
+            if let Some(track_id) = track_id {
+                yield MonoEvent::Waveform { track_id, peaks };
+            }
+        }
+    }
+
     /// Stream live audio peak levels at ~30fps for waveform visualization
     #[plexus_macros::hub_method(
         streaming,

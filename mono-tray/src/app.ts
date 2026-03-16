@@ -189,17 +189,42 @@ function formatTime(secs: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
-async function fetchCoverArt(trackId: number): Promise<void> {
-  try {
-    for await (const event of mono.cover(trackId, 640)) {
-      if (event.type === 'cover') {
-        const cover = event as MonoEventCover;
-        albumArt.src = cover.url;
-        albumArt.classList.add('loaded');
-        return;
+// --- Cover art cache ---
+const coverCache = new Map<number, string>();
+const coverInflight = new Map<number, Promise<string | null>>();
+
+async function getCoverUrl(trackId: number): Promise<string | null> {
+  const cached = coverCache.get(trackId);
+  if (cached) return cached;
+
+  const inflight = coverInflight.get(trackId);
+  if (inflight) return inflight;
+
+  const promise = (async (): Promise<string | null> => {
+    try {
+      for await (const event of mono.cover(trackId, 640)) {
+        if (event.type === 'cover') {
+          const url = (event as MonoEventCover).url;
+          coverCache.set(trackId, url);
+          return url;
+        }
       }
-    }
-  } catch {
+    } catch { /* no cover */ }
+    return null;
+  })();
+
+  coverInflight.set(trackId, promise);
+  const result = await promise;
+  coverInflight.delete(trackId);
+  return result;
+}
+
+async function fetchCoverArt(trackId: number): Promise<void> {
+  const url = await getCoverUrl(trackId);
+  if (url) {
+    albumArt.src = url;
+    albumArt.classList.add('loaded');
+  } else {
     albumArt.classList.remove('loaded');
   }
 }
@@ -258,24 +283,19 @@ function makeCoverThumb(trackId: number): HTMLDivElement {
   wrap.appendChild(placeholder);
   wrap.appendChild(img);
   // Lazy load cover
-  (async () => {
-    try {
-      for await (const event of mono.cover(trackId, 640)) {
-        if (event.type === 'cover') {
-          img.src = (event as MonoEventCover).url;
-          img.onload = () => {
-            img.classList.add('loaded');
-            wrap.classList.remove('loading');
-            wrap.classList.add('has-cover');
-          };
-          return;
-        }
-      }
-    } catch { /* no cover */ }
-    // No cover found
-    wrap.classList.remove('loading');
-    wrap.classList.add('failed');
-  })();
+  getCoverUrl(trackId).then(url => {
+    if (url) {
+      img.src = url;
+      img.onload = () => {
+        img.classList.add('loaded');
+        wrap.classList.remove('loading');
+        wrap.classList.add('has-cover');
+      };
+    } else {
+      wrap.classList.remove('loading');
+      wrap.classList.add('failed');
+    }
+  });
   return wrap;
 }
 
@@ -301,16 +321,15 @@ function makeAlbumCoverThumb(albumId: number): HTMLDivElement {
         }
       }
       if (firstTrackId) {
-        for await (const event of mono.cover(firstTrackId, 640)) {
-          if (event.type === 'cover') {
-            img.src = (event as MonoEventCover).url;
-            img.onload = () => {
-              img.classList.add('loaded');
-              wrap.classList.remove('loading');
-              wrap.classList.add('has-cover');
-            };
-            return;
-          }
+        const url = await getCoverUrl(firstTrackId);
+        if (url) {
+          img.src = url;
+          img.onload = () => {
+            img.classList.add('loaded');
+            wrap.classList.remove('loading');
+            wrap.classList.add('has-cover');
+          };
+          return;
         }
       }
     } catch { /* no cover */ }
@@ -1091,22 +1110,18 @@ async function loadAlbumDetail(albumId: number): Promise<void> {
 
     // Load cover art from first track (mono.cover needs track IDs, not album IDs)
     if (tracks.length > 0) {
-      (async () => {
-        try {
-          for await (const event of mono.cover(tracks[0].id, 640)) {
-            if (event.type === 'cover') {
-              detailCoverImg.src = (event as MonoEventCover).url;
-              detailCoverImg.onload = () => {
-                detailCover.classList.remove('loading');
-                detailCover.classList.add('loaded');
-              };
-              return;
-            }
-          }
-        } catch { /* no cover */ }
-        detailCover.classList.remove('loading');
-        detailCover.style.display = 'none';
-      })();
+      getCoverUrl(tracks[0].id).then(url => {
+        if (url) {
+          detailCoverImg.src = url;
+          detailCoverImg.onload = () => {
+            detailCover.classList.remove('loading');
+            detailCover.classList.add('loaded');
+          };
+        } else {
+          detailCover.classList.remove('loading');
+          detailCover.style.display = 'none';
+        }
+      });
     } else {
       detailCover.classList.remove('loading');
       detailCover.style.display = 'none';
@@ -2258,6 +2273,22 @@ async function streamNowPlaying(): Promise<void> {
 
 // --- Audio peaks stream: ~30fps peak data for smooth waveform ---
 async function streamAudioPeaks(): Promise<void> {
+  // Seed waveform from server-side history buffer on connect
+  try {
+    for await (const event of player.waveform()) {
+      if ((event as any).type === 'waveform') {
+        const peaks = (event as any).peaks as number[];
+        const start = Math.max(0, peaks.length - PEAK_BUFFER_SIZE);
+        for (let i = start; i < peaks.length; i++) {
+          peakBuffer[peakWriteIndex] = peaks[i];
+          peakWriteIndex = (peakWriteIndex + 1) % PEAK_BUFFER_SIZE;
+          if (peakBufferFilled < PEAK_BUFFER_SIZE) peakBufferFilled++;
+        }
+      }
+    }
+  } catch {
+    // Waveform history not available, start empty
+  }
   while (true) {
     try {
       for await (const event of player.audioPeaks()) {

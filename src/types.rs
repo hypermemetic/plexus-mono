@@ -244,6 +244,14 @@ pub enum MonoEvent {
         peak: f32,
     },
 
+    /// Buffered waveform peak history for instant rendering on connect
+    Waveform {
+        /// Track ID these peaks belong to
+        track_id: u64,
+        /// Peak values (0.0–1.0) in chronological order, ~30fps
+        peaks: Vec<f32>,
+    },
+
     /// Queue contents snapshot
     Queue {
         /// Tracks in queue (current + upcoming)

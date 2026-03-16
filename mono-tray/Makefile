@@ -4,7 +4,7 @@
 #   - plexus-mono server running on port 4448 (for codegen)
 #   - synapse-cc, bun, cargo-tauri installed
 
-.PHONY: all dev build codegen codegen-force frontend app run restart install install-user clean backend backend-restart full
+.PHONY: all dev build codegen codegen-force frontend app run restart install install-user clean backend backend-restart full full-app screenshots
 
 # Full build: codegen → frontend → native app
 all: codegen frontend app
@@ -90,6 +90,18 @@ full:
 	fi
 	synapse-cc build $(CODEGEN_FLAGS)
 	$(MAKE) run
+	$(MAKE) screenshots
+
+# Full cycle without backend restart: codegen, build & run app, screenshots
+# Use when the backend is already running and you don't want to interrupt playback
+full-app:
+	synapse-cc build $(CODEGEN_FLAGS)
+	$(MAKE) run
+	$(MAKE) screenshots
+
+# Generate documentation screenshots via Playwright (requires backend running)
+screenshots:
+	npx playwright test
 
 # Clean build artifacts
 clean:
