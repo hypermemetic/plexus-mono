@@ -65,11 +65,29 @@ ifdef FORCE_CODEGEN
 CODEGEN_FLAGS = --force
 endif
 
+BACKEND_BIN = $(abspath ../target/debug/plexus-mono)
+
+# Detect if server needs restart: binary changed OR binary is newer than process.
 full:
-	-lsof -ti :4448 | xargs kill 2>/dev/null; sleep 0.5
-	cd .. && cargo build --bin plexus-mono
-	cd .. && cargo run --bin plexus-mono &
-	synapse-cc wait monochrome --url ws://127.0.0.1:4448 --timeout 15
+	@cd .. && cargo build --bin plexus-mono; \
+	PID=$$(lsof -ti :4448 2>/dev/null | head -1); \
+	if [ -z "$$PID" ]; then \
+		echo "Server not running — starting..."; \
+		"$(BACKEND_BIN)" & \
+		synapse-cc wait monochrome --url ws://127.0.0.1:4448 --timeout 15; \
+	else \
+		BIN_MOD=$$(stat -f %m "$(BACKEND_BIN)" 2>/dev/null || echo 0); \
+		PROC_START=$$(ps -p $$PID -o lstart= 2>/dev/null); \
+		PROC_EPOCH=$$(date -j -f "%a %b %d %T %Y" "$$PROC_START" +%s 2>/dev/null || echo 0); \
+		if [ "$$BIN_MOD" -gt "$$PROC_EPOCH" ]; then \
+			echo "Binary newer than running server — restarting..."; \
+			kill $$PID 2>/dev/null; sleep 0.5; \
+			"$(BACKEND_BIN)" & \
+			synapse-cc wait monochrome --url ws://127.0.0.1:4448 --timeout 15; \
+		else \
+			echo "Server already running with latest binary."; \
+		fi; \
+	fi
 	synapse-cc build $(CODEGEN_FLAGS)
 	$(MAKE) run
 

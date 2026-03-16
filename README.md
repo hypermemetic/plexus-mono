@@ -2,6 +2,17 @@
 
 A macOS menu bar music player for Tidal, powered by [Plexus](https://github.com/juggernautlabs/plexus-core) RPC and the [Monochrome](https://monochrome.tf) API. Lives in your menu bar, streams lossless audio, downloads for offline, and builds playlists with AI research.
 
+<p align="center">
+  <img src="docs/screenshots/now-playing.png" width="220" alt="Now Playing" />
+  <img src="docs/screenshots/browse.png" width="220" alt="Library" />
+  <img src="docs/screenshots/search.png" width="220" alt="Search" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/queue.png" width="220" alt="Queue" />
+  <img src="docs/screenshots/history.png" width="220" alt="History" />
+  <img src="docs/screenshots/playlist-detail.png" width="220" alt="Playlist Detail" />
+</p>
+
 ## Architecture
 
 ```
@@ -51,7 +62,8 @@ A macOS menu bar music player for Tidal, powered by [Plexus](https://github.com/
 ### Likes
 
 - Toggle heart on any track (optimistic UI with pop animation)
-- Liked songs appear as a virtual playlist in the library
+- **Source annotation** — records which view or playlist a track was liked from (now-playing, queue, browse, playlist, album, etc.)
+- **Liked playlist** — auto-synced `Liked.json` replaces the old virtual list; guarded from manual CRUD (use like/unlike to modify)
 - Like state shown in now-playing stream
 
 ### Playlists
@@ -102,7 +114,8 @@ Results are saved with full provenance (search terms used, all found tracks, cur
 - **Download progress** — circular ring that fills in real time, smooth CSS transitions
 - **Disconnect overlay** — blurred overlay with auto-reconnect when backend is unreachable
 - **Desktop notifications** — track changes, research completion, playlist creation
-- **Window auto-resize** — height adjusts per view (556px now-playing, 600px browse/queue/history, 650px research)
+- **Rolling waveform** — canvas visualization above the progress bar showing live audio peaks, with silence detection (warning after 5s of no audio)
+- **Window auto-resize** — height adjusts per view (582px now-playing, 600px browse/queue/history, 650px research)
 - **Click-away dismiss** — panel hides when clicking outside
 - **Space change dismiss** — panel hides when switching macOS Spaces
 
@@ -140,7 +153,8 @@ make full
 
 | Target | Description |
 |--------|-------------|
-| `make full` | Restart backend + codegen + build + run (the everything target) |
+| `make full` | Restart backend + wait for readiness + codegen + build + run |
+| `make full FORCE_CODEGEN=1` | Same as above but force-regenerates TypeScript clients |
 | `make run` | Build release app, install to ~/Applications, launch |
 | `make dev` | Tauri dev server with hot reload |
 | `make backend` | Start plexus-mono on port 4448 |
@@ -159,7 +173,9 @@ make full
 | Player state | `~/.plexus/monochrome/player/state.json` |
 | Listen stats | `~/.plexus/monochrome/player/stats.json` |
 | Listen log | `~/.plexus/monochrome/player/listen_log.json` |
-| Likes & download registry | SQLite (in-process) |
+| Liked playlist | `~/.plexus/monochrome/player/playlists/Liked.json` |
+| Research results | `~/.plexus/monochrome/player/research/` |
+| Likes & download registry | SQLite (`~/.plexus/monochrome/player/mono.db`) |
 
 ## RPC API
 
@@ -179,3 +195,10 @@ synapse -P 4448 player play --id 12345
 synapse -P 4448 player queue_add --id 67890 --source "from CLI"
 synapse -P 4448 player playlist list
 ```
+
+## Architecture Docs
+
+Detailed design documents live in [`docs/architecture/`](docs/architecture/):
+
+- [Claude Code Integration](docs/architecture/16673150175942673663_claude-code-integration.md) — two-backend architecture, AI research pipeline, streaming event protocol, Arbor tree integration
+- [NSPanel Hover Events](docs/architecture/16673278998284554495_nspanel-hover-events.md) — how mouse tracking works in non-activating NSPanel webviews via global monitor + JS polyfill

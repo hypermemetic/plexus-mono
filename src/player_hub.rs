@@ -473,6 +473,23 @@ impl PlayerHub {
         }
     }
 
+    /// Stream live audio peak levels at ~30fps for waveform visualization
+    #[plexus_macros::hub_method(
+        streaming,
+        description = "Stream real-time audio peak levels (~30fps) for waveform visualization"
+    )]
+    pub async fn audio_peaks(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let peak_handle = self.player.audio_peak_handle();
+        stream! {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(33)).await;
+                let bits = peak_handle.load(std::sync::atomic::Ordering::Relaxed);
+                let peak = f32::from_bits(bits);
+                yield MonoEvent::AudioPeak { peak };
+            }
+        }
+    }
+
     /// Get listening stats for a specific track
     #[plexus_macros::hub_method(
         description = "Get per-track listening statistics (play count, skip count, total listen time)",

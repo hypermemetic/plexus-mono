@@ -238,6 +238,12 @@ pub enum MonoEvent {
         audio_peak: Option<f32>,
     },
 
+    /// Audio peak level for waveform visualization (~30fps)
+    AudioPeak {
+        /// Peak amplitude 0.0–1.0
+        peak: f32,
+    },
+
     /// Queue contents snapshot
     Queue {
         /// Tracks in queue (current + upcoming)

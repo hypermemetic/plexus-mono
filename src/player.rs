@@ -381,16 +381,19 @@ impl Player {
                     continue;
                 }
                 let mut inner = this.inner.lock().await;
-                if matches!(inner.status, PlayStatus::Playing) {
-                    // Track ended naturally — record as complete
-                    let listen_info = inner.current_track.as_ref().map(|t| (t.id, t.duration_secs as f32));
-                    let started_at = inner.listen_started_at.take();
-                    if let (Some((track_id, duration)), Some(started_at)) = (listen_info, started_at) {
-                        drop(inner);
-                        let mut stats = this.stats.lock().await;
-                        stats.record_end(track_id, &started_at, duration, ListenOutcome::Complete);
-                        drop(stats);
-                        inner = this.inner.lock().await;
+                let should_advance = matches!(inner.status, PlayStatus::Playing | PlayStatus::Failed);
+                if should_advance {
+                    // Track ended naturally or failed — record completion if it was playing
+                    if matches!(inner.status, PlayStatus::Playing) {
+                        let listen_info = inner.current_track.as_ref().map(|t| (t.id, t.duration_secs as f32));
+                        let started_at = inner.listen_started_at.take();
+                        if let (Some((track_id, duration)), Some(started_at)) = (listen_info, started_at) {
+                            drop(inner);
+                            let mut stats = this.stats.lock().await;
+                            stats.record_end(track_id, &started_at, duration, ListenOutcome::Complete);
+                            drop(stats);
+                            inner = this.inner.lock().await;
+                        }
                     }
                     if let Some(current) = inner.current_track.take() {
                         inner.history.push(current);
@@ -400,11 +403,8 @@ impl Player {
                         drop(inner);
                         if let Err(e) = this.start_playback(next).await {
                             tracing::error!("auto-advance failed: {e}");
-                            let mut inner = this.inner.lock().await;
-                            inner.status = PlayStatus::Idle;
-                            inner.current_track = None;
-                            drop(inner);
-                            this.broadcast_now_playing().await;
+                            // Don't go idle — the Failed status will trigger
+                            // another auto-advance attempt on the next track
                         }
                         this.save_state().await;
                     } else {
@@ -653,19 +653,30 @@ impl Player {
         self.broadcast_now_playing().await;
 
         // Priority: prefetch cache → local download → HTTP stream
-        let (reader, content_length): (Box<dyn ReadSeekSend>, Option<u64>) = {
+        let audio_result: Result<(Box<dyn ReadSeekSend>, Option<u64>), String> = {
             let mut inner = self.inner.lock().await;
             if let Some((r, cl)) = inner.prefetched.remove(&track.id) {
                 tracing::debug!("using prefetched audio for track {}", track.id);
-                (r, cl)
+                Ok((r, cl))
             } else {
                 drop(inner);
-                self.resolve_audio_source(&track).await?
+                self.resolve_audio_source(&track).await
+            }
+        };
+        let (reader, content_length) = match audio_result {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("failed to resolve audio for track {}: {e}", track.id);
+                let mut inner = self.inner.lock().await;
+                inner.status = PlayStatus::Failed;
+                drop(inner);
+                self.broadcast_now_playing().await;
+                return Err(e);
             }
         };
 
         // Decode on blocking thread — tell symphonia the stream is seekable
-        let source = tokio::task::spawn_blocking(move || {
+        let source = match tokio::task::spawn_blocking(move || {
             let mut builder = rodio::Decoder::builder()
                 .with_data(reader)
                 .with_seekable(true);
@@ -675,8 +686,27 @@ impl Player {
             builder.build()
         })
         .await
-        .map_err(|e| format!("decoder task panicked: {e}"))?
-        .map_err(|e| format!("audio decode error: {e}"))?;
+        {
+            Ok(Ok(source)) => source,
+            Ok(Err(e)) => {
+                let msg = format!("audio decode error: {e}");
+                tracing::error!("{msg}");
+                let mut inner = self.inner.lock().await;
+                inner.status = PlayStatus::Failed;
+                drop(inner);
+                self.broadcast_now_playing().await;
+                return Err(msg);
+            }
+            Err(e) => {
+                let msg = format!("decoder task panicked: {e}");
+                tracing::error!("{msg}");
+                let mut inner = self.inner.lock().await;
+                inner.status = PlayStatus::Failed;
+                drop(inner);
+                self.broadcast_now_playing().await;
+                return Err(msg);
+            }
+        };
 
         // Stop previous audio, wrap with level monitor, append and play
         self.sink.stop();
@@ -711,20 +741,30 @@ impl Player {
             }
         }
 
-        // Resolve CDN URL
-        let manifest = self.client.stream_manifest(track.id, &track.quality).await?;
+        // Resolve CDN URL (with timeout to avoid hanging on expired sessions)
+        let manifest = tokio::time::timeout(
+            Duration::from_secs(10),
+            self.client.stream_manifest(track.id, &track.quality),
+        )
+        .await
+        .map_err(|_| "stream manifest timed out (10s) — Tidal session may have expired".to_string())?
+        .map_err(|e| format!("stream manifest error: {e}"))?;
         let url = match &manifest {
             MonoEvent::StreamManifest { url, .. } => url.clone(),
             _ => return Err("unexpected manifest type".to_string()),
         };
 
-        // Create streaming reader
-        let http_stream = stream_download::http::HttpStream::<
-            stream_download::http::reqwest::Client,
-        >::create(
-            url.parse::<reqwest::Url>().map_err(|e| format!("bad stream url: {e}"))?
+        // Create streaming reader (with timeout)
+        let http_stream = tokio::time::timeout(
+            Duration::from_secs(15),
+            stream_download::http::HttpStream::<
+                stream_download::http::reqwest::Client,
+            >::create(
+                url.parse::<reqwest::Url>().map_err(|e| format!("bad stream url: {e}"))?
+            ),
         )
         .await
+        .map_err(|_| "CDN stream connection timed out (15s)".to_string())?
         .map_err(|e| format!("http stream error: {e}"))?;
         let cl = http_stream.content_length();
         let r = stream_download::StreamDownload::from_stream(
@@ -1127,6 +1167,11 @@ impl Player {
     }
 
     /// Subscribe to now-playing updates
+    /// Get a handle to the live audio peak atomic (updated at ~30fps by LevelMonitor)
+    pub fn audio_peak_handle(&self) -> Arc<AtomicU32> {
+        self.audio_peak.clone()
+    }
+
     pub fn subscribe_now_playing(&self) -> watch::Receiver<NowPlaying> {
         self.now_playing_rx.clone()
     }

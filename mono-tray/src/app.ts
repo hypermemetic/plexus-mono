@@ -124,9 +124,11 @@ const historySubheader = document.getElementById('history-subheader')!;
 const historyTracksEl = document.getElementById('history-tracks')!;
 
 // --- Waveform state ---
+// Rolling waveform: peaks stream in at ~30fps from the audio_peaks endpoint.
+// Drawn as a smooth freeform shape floating above the progress bar.
 const waveformCanvas = document.getElementById('waveform-canvas') as HTMLCanvasElement;
 const waveCtx = waveformCanvas.getContext('2d')!;
-const PEAK_BUFFER_SIZE = 150;
+const PEAK_BUFFER_SIZE = 200;
 const peakBuffer = new Float32Array(PEAK_BUFFER_SIZE);
 let peakWriteIndex = 0;
 let peakBufferFilled = 0;
@@ -479,9 +481,7 @@ function updateUI(np: MonoEventNowPlaying): void {
     albumArt.classList.remove('loaded');
   }
 
-  // --- Waveform peak processing ---
-  const audioPeak = (np as any).audioPeak ?? 0;
-  // Reset buffer on track change
+  // --- Waveform: reset buffer on track change ---
   if (np.trackId !== lastWaveformTrackId) {
     lastWaveformTrackId = np.trackId ?? null;
     peakBuffer.fill(0);
@@ -489,27 +489,10 @@ function updateUI(np: MonoEventNowPlaying): void {
     peakBufferFilled = 0;
     silenceSince = null;
   }
-
-  if (np.status === 'playing') {
-    // Generate ~3 intermediate values with jitter for organic look
-    const jitterCount = 3;
-    for (let i = 0; i < jitterCount; i++) {
-      const jitter = audioPeak * (0.6 + Math.random() * 0.8);
-      peakBuffer[peakWriteIndex] = jitter;
-      peakWriteIndex = (peakWriteIndex + 1) % PEAK_BUFFER_SIZE;
-      if (peakBufferFilled < PEAK_BUFFER_SIZE) peakBufferFilled++;
-    }
-
-    // Silence detection
-    if (audioPeak < 0.005) {
-      if (silenceSince === null) silenceSince = Date.now();
-    } else {
-      silenceSince = null;
-    }
-  }
 }
 
 // --- Waveform drawing ---
+// Smooth freeform shape from rolling peak buffer, floating above progress bar.
 function drawWaveform(): void {
   waveformAnimId = requestAnimationFrame(drawWaveform);
 
@@ -517,7 +500,7 @@ function drawWaveform(): void {
   const h = waveformCanvas.height;
   waveCtx.clearRect(0, 0, w, h);
 
-  if (!isPlaying || peakBufferFilled === 0) return;
+  if (!isPlaying || peakBufferFilled < 2) return;
 
   // Dotted line while scrubbing
   if (scrubbing) {
@@ -525,29 +508,64 @@ function drawWaveform(): void {
     waveCtx.strokeStyle = '#888';
     waveCtx.lineWidth = 1;
     waveCtx.beginPath();
-    waveCtx.moveTo(0, h / 2);
-    waveCtx.lineTo(w, h / 2);
+    waveCtx.moveTo(0, h - 1);
+    waveCtx.lineTo(w, h - 1);
     waveCtx.stroke();
     waveCtx.setLineDash([]);
     return;
   }
 
   const silenceWarning = silenceSince !== null && (Date.now() - silenceSince) > 5000;
-  const barCount = Math.min(peakBufferFilled, PEAK_BUFFER_SIZE);
-  const barWidth = w / PEAK_BUFFER_SIZE;
-  const accentColor = silenceWarning ? '#e74c3c' : '#1db954';
+  const count = Math.min(peakBufferFilled, PEAK_BUFFER_SIZE);
+  const step = w / (PEAK_BUFFER_SIZE - 1);
+  const accentColor = silenceWarning ? 'rgba(231, 76, 60, 0.7)' : 'rgba(29, 185, 84, 0.6)';
 
-  waveCtx.fillStyle = accentColor;
-
-  for (let i = 0; i < barCount; i++) {
-    // Read from buffer: oldest to newest
-    const bufIdx = (peakWriteIndex - barCount + i + PEAK_BUFFER_SIZE) % PEAK_BUFFER_SIZE;
+  // Build points array: oldest → newest, left → right
+  const points: { x: number; y: number }[] = [];
+  for (let i = 0; i < count; i++) {
+    const bufIdx = (peakWriteIndex - count + i + PEAK_BUFFER_SIZE) % PEAK_BUFFER_SIZE;
     const peak = peakBuffer[bufIdx];
-    const barH = Math.max(1, peak * h * 0.9);
-    const x = i * barWidth;
-    const y = (h - barH) / 2;
-    waveCtx.fillRect(x, y, Math.max(1, barWidth - 0.5), barH);
+    const x = (PEAK_BUFFER_SIZE - count + i) * step;
+    const y = h - Math.max(1, peak * h * 0.85);
+    points.push({ x, y });
   }
+
+  // Draw filled smooth curve using quadratic bezier through midpoints
+  waveCtx.beginPath();
+  waveCtx.moveTo(points[0].x, h); // start at bottom-left
+  waveCtx.lineTo(points[0].x, points[0].y);
+
+  for (let i = 0; i < points.length - 1; i++) {
+    const mx = (points[i].x + points[i + 1].x) / 2;
+    const my = (points[i].y + points[i + 1].y) / 2;
+    waveCtx.quadraticCurveTo(points[i].x, points[i].y, mx, my);
+  }
+
+  // Final point
+  const last = points[points.length - 1];
+  waveCtx.lineTo(last.x, last.y);
+  waveCtx.lineTo(last.x, h); // down to bottom-right
+  waveCtx.closePath();
+
+  // Gradient fill: accent at top, fading to transparent at bottom
+  const grad = waveCtx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, accentColor);
+  grad.addColorStop(1, 'rgba(29, 185, 84, 0.05)');
+  waveCtx.fillStyle = silenceWarning ? 'rgba(231, 76, 60, 0.3)' : grad;
+  waveCtx.fill();
+
+  // Stroke the top edge for definition
+  waveCtx.beginPath();
+  waveCtx.moveTo(points[0].x, points[0].y);
+  for (let i = 0; i < points.length - 1; i++) {
+    const mx = (points[i].x + points[i + 1].x) / 2;
+    const my = (points[i].y + points[i + 1].y) / 2;
+    waveCtx.quadraticCurveTo(points[i].x, points[i].y, mx, my);
+  }
+  waveCtx.lineTo(last.x, last.y);
+  waveCtx.strokeStyle = silenceWarning ? '#e74c3c' : '#1db954';
+  waveCtx.lineWidth = 1.5;
+  waveCtx.stroke();
 
   if (silenceWarning) {
     waveCtx.fillStyle = '#e74c3c';
@@ -2237,6 +2255,33 @@ async function streamNowPlaying(): Promise<void> {
     await new Promise(r => setTimeout(r, 2000));
   }
 }
+
+// --- Audio peaks stream: ~30fps peak data for smooth waveform ---
+async function streamAudioPeaks(): Promise<void> {
+  while (true) {
+    try {
+      for await (const event of player.audioPeaks()) {
+        if ((event as any).type === 'audio_peak') {
+          const peak = (event as any).peak as number;
+          peakBuffer[peakWriteIndex] = peak;
+          peakWriteIndex = (peakWriteIndex + 1) % PEAK_BUFFER_SIZE;
+          if (peakBufferFilled < PEAK_BUFFER_SIZE) peakBufferFilled++;
+
+          // Silence detection
+          if (peak < 0.005) {
+            if (silenceSince === null) silenceSince = Date.now();
+          } else {
+            silenceSince = null;
+          }
+        }
+      }
+    } catch {
+      // Stream ended or disconnected, retry after delay
+    }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+}
+streamAudioPeaks();
 
 // --- JS hover polyfill (CSS :hover doesn't fire in NSPanel WebView) ---
 // Native global mouseMoved monitor in Rust emits coordinates via Tauri events.
