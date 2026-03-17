@@ -14,3 +14,6 @@ dist/
 
 # Tauri generated schemas (large, regenerated on build)
 mono-tray/src-tauri/gen/schemas/
+
+# Playwright test results
+test-results/
