@@ -3,7 +3,7 @@
 //! All rodio interaction is isolated to a single OS thread (OutputStream is !Send).
 //! The Sink is Send+Sync and shared via Arc for control from async code.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -292,6 +292,40 @@ impl Default for NowPlaying {
     }
 }
 
+/// Shuffle radio mode — randomly picks tracks from a source pool
+struct ShufflePool {
+    track_pool: Vec<u64>,
+    played: HashSet<u64>,
+    active: bool,
+}
+
+impl ShufflePool {
+    fn new() -> Self {
+        Self { track_pool: Vec::new(), played: HashSet::new(), active: false }
+    }
+
+    fn pick_next(&mut self) -> Option<u64> {
+        let available: Vec<u64> = self.track_pool.iter()
+            .copied()
+            .filter(|id| !self.played.contains(id))
+            .collect();
+        if available.is_empty() {
+            // All played — reset and re-pick
+            self.played.clear();
+            if self.track_pool.is_empty() { return None; }
+            let idx = rand::random_range(0..self.track_pool.len());
+            let id = self.track_pool[idx];
+            self.played.insert(id);
+            Some(id)
+        } else {
+            let idx = rand::random_range(0..available.len());
+            let id = available[idx];
+            self.played.insert(id);
+            Some(id)
+        }
+    }
+}
+
 struct PlayerInner {
     queue: VecDeque<QueuedTrack>,
     current_track: Option<QueuedTrack>,
@@ -305,6 +339,8 @@ struct PlayerInner {
     prefetched: HashMap<u64, (Box<dyn ReadSeekSend>, Option<u64>)>,
     /// Timestamp when current track started playing (ISO 8601)
     listen_started_at: Option<String>,
+    /// Shuffle radio mode state
+    shuffle: ShufflePool,
 }
 
 /// Circular buffer of recent audio peak values for waveform history.
@@ -386,6 +422,7 @@ impl Player {
                 history: Vec::new(),
                 prefetched: HashMap::new(),
                 listen_started_at: None,
+                shuffle: ShufflePool::new(),
             }),
             stats: Mutex::new(StatsStore::load()),
             storage,
@@ -462,9 +499,9 @@ impl Player {
                         drop(inner);
                         if let Err(e) = this.start_playback(next).await {
                             tracing::error!("auto-advance failed: {e}");
-                            // Don't go idle — the Failed status will trigger
-                            // another auto-advance attempt on the next track
                         }
+                        // Refill shuffle queue after advancing
+                        this.shuffle_refill().await;
                         this.save_state().await;
                     } else {
                         inner.status = PlayStatus::Idle;
@@ -495,6 +532,35 @@ impl Player {
                 if current_id != last_track_id {
                     last_track_id = current_id;
                     this.prefetch_queue().await;
+                }
+            }
+        });
+
+        // Lock watchdog — detects when PlayerInner mutex is held too long
+        let weak = Arc::downgrade(&player);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let Some(this) = weak.upgrade() else { break };
+                let acquire_start = tokio::time::Instant::now();
+                let result =
+                    tokio::time::timeout(Duration::from_secs(3), this.inner.lock()).await;
+                match result {
+                    Ok(_guard) => {
+                        let elapsed = acquire_start.elapsed();
+                        drop(_guard);
+                        if elapsed > Duration::from_secs(1) {
+                            tracing::warn!(
+                                "lock watchdog: lock acquired after {:.1}s (slow)",
+                                elapsed.as_secs_f32()
+                            );
+                        }
+                    }
+                    Err(_) => {
+                        tracing::error!(
+                            "LOCK WATCHDOG: PlayerInner mutex blocked for >3s — possible deadlock/stall"
+                        );
+                    }
                 }
             }
         });
@@ -643,10 +709,26 @@ impl Player {
             .expect("failed to spawn media-controls thread");
     }
 
-    /// Broadcast current state through the watch channel
+    /// Broadcast current state through the watch channel.
+    /// Lock is held only briefly to snapshot state — storage I/O happens outside.
     async fn broadcast_now_playing(&self) {
-        let inner = self.inner.lock().await;
-        let track_id = inner.current_track.as_ref().map(|t| t.id);
+        // Snapshot everything we need under the lock, then drop it
+        let (track_id, title, artist, album, status, duration_secs, volume, preamp, queue_length, url) = {
+            let inner = self.inner.lock().await;
+            (
+                inner.current_track.as_ref().map(|t| t.id),
+                inner.current_track.as_ref().map(|t| t.title.clone()),
+                inner.current_track.as_ref().map(|t| t.artist.clone()),
+                inner.current_track.as_ref().map(|t| t.album.clone()),
+                inner.status.clone(),
+                inner.current_track.as_ref().map(|t| t.duration_secs as f32).unwrap_or(0.0),
+                inner.volume,
+                inner.preamp,
+                inner.queue.len(),
+                inner.current_track.as_ref().map(|t| format!("https://monochrome.tf/track/t/{}", t.id)),
+            )
+        };
+        // Storage I/O outside the lock — no mutex contention
         let (is_liked, is_downloaded) = if let Some(id) = track_id {
             let liked = self.storage.is_liked(id).await.unwrap_or(false);
             let downloaded = self.storage.is_downloaded(id).await.unwrap_or(false);
@@ -656,20 +738,16 @@ impl Player {
         };
         let np = NowPlaying {
             track_id,
-            title: inner.current_track.as_ref().map(|t| t.title.clone()),
-            artist: inner.current_track.as_ref().map(|t| t.artist.clone()),
-            album: inner.current_track.as_ref().map(|t| t.album.clone()),
-            status: inner.status.clone(),
+            title,
+            artist,
+            album,
+            status,
             position_secs: self.sink.get_pos().as_secs_f32(),
-            duration_secs: inner
-                .current_track
-                .as_ref()
-                .map(|t| t.duration_secs as f32)
-                .unwrap_or(0.0),
-            volume: inner.volume,
-            preamp: inner.preamp,
-            queue_length: inner.queue.len(),
-            url: inner.current_track.as_ref().map(|t| format!("https://monochrome.tf/track/t/{}", t.id)),
+            duration_secs,
+            volume,
+            preamp,
+            queue_length,
+            url,
             is_liked,
             is_downloaded,
             audio_peak: f32::from_bits(self.audio_peak.load(Ordering::Relaxed)),
@@ -1023,6 +1101,33 @@ impl Player {
         result
     }
 
+    /// Add a track to the front of the queue (play next). Auto-starts if idle.
+    pub async fn queue_add_next(&self, id: u64, quality: &str, source: Option<String>) -> Result<(), String> {
+        let track_info = self.client.track_info(id).await.ok();
+        let mut queued = make_queued_track(id, quality, track_info);
+        queued.source = source;
+
+        let should_start = {
+            let mut inner = self.inner.lock().await;
+            let idle = matches!(inner.status, PlayStatus::Idle | PlayStatus::Stopped);
+            if idle {
+                true
+            } else {
+                inner.queue.push_front(queued.clone());
+                false
+            }
+        };
+
+        let result = if should_start {
+            self.start_playback(queued).await
+        } else {
+            self.broadcast_now_playing().await;
+            Ok(())
+        };
+        self.save_state().await;
+        result
+    }
+
     /// Add all tracks from an album to the queue. Auto-starts if idle.
     pub async fn queue_album(&self, album_id: u64, quality: &str) -> Result<Vec<QueuedTrack>, String> {
         let (_album_event, track_events) = self.client.album(album_id).await?;
@@ -1175,53 +1280,62 @@ impl Player {
         };
 
         for track in tracks {
-            // Resolve manifest
-            let manifest = match self.client.stream_manifest(track.id, &track.quality).await {
-                Ok(m) => m,
-                Err(e) => {
-                    tracing::debug!("prefetch manifest failed for {}: {e}", track.id);
-                    continue;
-                }
-            };
-            let url = match &manifest {
-                MonoEvent::StreamManifest { url, .. } => url.clone(),
-                _ => continue,
-            };
-            let parsed = match url.parse::<reqwest::Url>() {
-                Ok(u) => u,
-                Err(_) => continue,
-            };
+            // Each prefetch gets a 30s budget — prevents stalled CDN connections from
+            // blocking the prefetch watcher indefinitely.
+            let result = tokio::time::timeout(Duration::from_secs(30), async {
+                // Resolve manifest
+                let manifest = match self.client.stream_manifest(track.id, &track.quality).await {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::debug!("prefetch manifest failed for {}: {e}", track.id);
+                        return;
+                    }
+                };
+                let url = match &manifest {
+                    MonoEvent::StreamManifest { url, .. } => url.clone(),
+                    _ => return,
+                };
+                let parsed = match url.parse::<reqwest::Url>() {
+                    Ok(u) => u,
+                    Err(_) => return,
+                };
 
-            // Start download with content_length extraction
-            let http_stream = match stream_download::http::HttpStream::<
-                stream_download::http::reqwest::Client,
-            >::create(parsed)
-            .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::debug!("prefetch http stream failed for {}: {e}", track.id);
-                    continue;
-                }
-            };
-            let content_length = http_stream.content_length();
-            let reader = match stream_download::StreamDownload::from_stream(
-                http_stream,
-                stream_download::storage::temp::TempStorageProvider::new(),
-                stream_download::Settings::default(),
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::debug!("prefetch download failed for {}: {e}", track.id);
-                    continue;
-                }
-            };
+                // Start download with content_length extraction
+                let http_stream = match stream_download::http::HttpStream::<
+                    stream_download::http::reqwest::Client,
+                >::create(parsed)
+                .await
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::debug!("prefetch http stream failed for {}: {e}", track.id);
+                        return;
+                    }
+                };
+                let content_length = http_stream.content_length();
+                let reader = match stream_download::StreamDownload::from_stream(
+                    http_stream,
+                    stream_download::storage::temp::TempStorageProvider::new(),
+                    stream_download::Settings::default(),
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::debug!("prefetch download failed for {}: {e}", track.id);
+                        return;
+                    }
+                };
 
-            tracing::debug!("prefetched track {} ({})", track.id, track.title);
-            let mut inner = self.inner.lock().await;
-            inner.prefetched.insert(track.id, (Box::new(reader), content_length));
+                tracing::debug!("prefetched track {} ({})", track.id, track.title);
+                let mut inner = self.inner.lock().await;
+                inner.prefetched.insert(track.id, (Box::new(reader), content_length));
+            })
+            .await;
+
+            if result.is_err() {
+                tracing::warn!("prefetch timed out for track {} ({})", track.id, track.title);
+            }
         }
     }
 
@@ -1564,6 +1678,79 @@ impl Player {
     pub async fn get_history(&self) -> Vec<QueuedTrack> {
         let inner = self.inner.lock().await;
         inner.history.clone()
+    }
+
+    // --- Shuffle radio mode ---
+
+    /// Start shuffle mode from a pool of track IDs. Clears the queue, picks
+    /// a first track and queues 1-2 upcoming.
+    pub async fn shuffle_start(&self, track_ids: Vec<u64>) -> Result<(), String> {
+        if track_ids.is_empty() {
+            return Err("no tracks in shuffle pool".to_string());
+        }
+
+        {
+            let mut inner = self.inner.lock().await;
+            inner.shuffle.track_pool = track_ids;
+            inner.shuffle.played.clear();
+            inner.shuffle.active = true;
+            inner.queue.clear();
+        }
+
+        // Pick the first track and start it
+        let first_id = {
+            let mut inner = self.inner.lock().await;
+            inner.shuffle.pick_next()
+        };
+        if let Some(id) = first_id {
+            let _ = self.queue_add(id, "LOSSLESS").await;
+        }
+
+        // Refill upcoming
+        self.shuffle_refill().await;
+        Ok(())
+    }
+
+    /// Stop shuffle mode. Leaves current track playing.
+    pub async fn shuffle_stop(&self) {
+        let mut inner = self.inner.lock().await;
+        inner.shuffle.active = false;
+        inner.shuffle.track_pool.clear();
+        inner.shuffle.played.clear();
+    }
+
+    /// Refill the queue to have 1-2 upcoming tracks from the shuffle pool.
+    async fn shuffle_refill(&self) {
+        let ids_to_add: Vec<u64> = {
+            let mut inner = self.inner.lock().await;
+            if !inner.shuffle.active { return; }
+            let needed = 2usize.saturating_sub(inner.queue.len());
+            let mut ids = Vec::new();
+            for _ in 0..needed {
+                if let Some(id) = inner.shuffle.pick_next() {
+                    ids.push(id);
+                } else {
+                    break;
+                }
+            }
+            ids
+        };
+
+        for id in ids_to_add {
+            let _ = self.queue_add(id, "LOSSLESS").await;
+        }
+    }
+
+    /// Check if shuffle mode is active
+    pub async fn shuffle_active(&self) -> bool {
+        let inner = self.inner.lock().await;
+        inner.shuffle.active
+    }
+
+    /// Get shuffle pool info for status display
+    pub async fn shuffle_status(&self) -> (bool, usize, usize) {
+        let inner = self.inner.lock().await;
+        (inner.shuffle.active, inner.shuffle.track_pool.len(), inner.shuffle.played.len())
     }
 }
 

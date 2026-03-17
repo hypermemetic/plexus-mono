@@ -445,9 +445,9 @@ function makeCoverThumb(trackId: number): HTMLDivElement {
 }
 
 /** Create a cover thumb for an album (loads album to get first track ID) */
-function makeAlbumCoverThumb(albumId: number): HTMLDivElement {
+function makeAlbumCoverThumb(coverId?: string | null): HTMLDivElement {
   const wrap = document.createElement('div');
-  wrap.className = 'cover-thumb loading';
+  wrap.className = 'cover-thumb';
   const img = document.createElement('img');
   img.alt = '';
   const placeholder = document.createElement('div');
@@ -455,32 +455,21 @@ function makeAlbumCoverThumb(albumId: number): HTMLDivElement {
   placeholder.innerHTML = placeholderSvg;
   wrap.appendChild(placeholder);
   wrap.appendChild(img);
-  // Get first track from album, then load its cover
-  (async () => {
-    try {
-      let firstTrackId: number | null = null;
-      for await (const event of mono.album(albumId)) {
-        if (event.type === 'album_track' && !firstTrackId) {
-          firstTrackId = (event as MonoEventAlbumTrack).id;
-          break;
-        }
-      }
-      if (firstTrackId) {
-        const url = await getCoverUrl(firstTrackId);
-        if (url) {
-          img.src = url;
-          img.onload = () => {
-            img.classList.add('loaded');
-            wrap.classList.remove('loading');
-            wrap.classList.add('has-cover');
-          };
-          return;
-        }
-      }
-    } catch { /* no cover */ }
-    wrap.classList.remove('loading');
+  if (coverId) {
+    wrap.classList.add('loading');
+    img.src = `https://resources.tidal.com/images/${coverId}/640x640.jpg`;
+    img.onload = () => {
+      img.classList.add('loaded');
+      wrap.classList.remove('loading');
+      wrap.classList.add('has-cover');
+    };
+    img.onerror = () => {
+      wrap.classList.remove('loading');
+      wrap.classList.add('failed');
+    };
+  } else {
     wrap.classList.add('failed');
-  })();
+  }
   return wrap;
 }
 
@@ -1150,6 +1139,16 @@ function renderSearchResults(results: MonoEventSearchTrack[], hasPlaylistSection
       rpcFire(player.queueAdd(track.id));
     });
 
+    // Play next button
+    const nextBtn = document.createElement('button');
+    nextBtn.className = 'row-action';
+    nextBtn.title = 'Play next';
+    nextBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>';
+    nextBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      rpcFire(player.queueAddNext(track.id));
+    });
+
     // Add to playlist button
     const plBtn = document.createElement('button');
     plBtn.className = 'row-action';
@@ -1163,6 +1162,7 @@ function renderSearchResults(results: MonoEventSearchTrack[], hasPlaylistSection
     row.appendChild(info);
     row.appendChild(playBtn);
     row.appendChild(addBtn);
+    row.appendChild(nextBtn);
     row.appendChild(plBtn);
     row.appendChild(makeDownloadBtn(track.id));
     browseList.appendChild(row);
@@ -1207,7 +1207,7 @@ function renderAlbumResults(results: MonoEventSearchAlbum[]): void {
     chevron.className = 'list-row-chevron';
     chevron.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>';
 
-    row.appendChild(makeAlbumCoverThumb(album.id));
+    row.appendChild(makeAlbumCoverThumb((album as any).coverId));
     row.appendChild(info);
     row.appendChild(chevron);
     browseList.appendChild(row);
@@ -1321,6 +1321,19 @@ async function loadAlbumDetail(albumId: number): Promise<void> {
       detailTracks.appendChild(dlAllBtn);
     }
 
+    // Shuffle album button
+    if (tracks.length > 1) {
+      const shuffleBtn = document.createElement('button');
+      shuffleBtn.className = 'save-queue-btn';
+      shuffleBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg> Shuffle';
+      shuffleBtn.addEventListener('click', async () => {
+        shuffleBtn.textContent = 'Shuffling...';
+        try { for await (const _ of player.shuffleStart([currentDetailAlbumId!])) { break; } } catch {}
+        navigateTo('now-playing');
+      });
+      detailTracks.appendChild(shuffleBtn);
+    }
+
     for (const track of tracks) {
       const row = document.createElement('div');
       row.className = 'list-row';
@@ -1351,8 +1364,19 @@ async function loadAlbumDetail(albumId: number): Promise<void> {
         rpcFire(player.queueAdd(track.id));
       });
 
+      // Play next button
+      const nextBtn = document.createElement('button');
+      nextBtn.className = 'row-action';
+      nextBtn.title = 'Play next';
+      nextBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>';
+      nextBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        rpcFire(player.queueAddNext(track.id));
+      });
+
       row.appendChild(info);
       row.appendChild(queueBtn);
+      row.appendChild(nextBtn);
       row.appendChild(makeDownloadBtn(track.id));
       detailTracks.appendChild(row);
     }
@@ -1426,7 +1450,7 @@ async function loadArtistAlbums(artistId: number, artistName: string): Promise<v
       chevron.className = 'list-row-chevron';
       chevron.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>';
 
-      row.appendChild(makeAlbumCoverThumb(album.id));
+      row.appendChild(makeAlbumCoverThumb((album as any).coverId));
       row.appendChild(info);
       row.appendChild(chevron);
       detailTracks.appendChild(row);
@@ -1464,6 +1488,19 @@ async function loadPlaylistDetail(name: string): Promise<void> {
     }
     detailSubheader.textContent = `${tracks.length} track${tracks.length !== 1 ? 's' : ''}`;
     detailTracks.innerHTML = '';
+
+    // Shuffle playlist button
+    if (tracks.length > 1) {
+      const shuffleBtn = document.createElement('button');
+      shuffleBtn.className = 'save-queue-btn';
+      shuffleBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg> Shuffle';
+      shuffleBtn.addEventListener('click', async () => {
+        shuffleBtn.textContent = 'Shuffling...';
+        try { for await (const _ of player.shuffleStart(undefined, [name])) { break; } } catch {}
+        navigateTo('now-playing');
+      });
+      detailTracks.appendChild(shuffleBtn);
+    }
 
     for (let i = 0; i < tracks.length; i++) {
       const track = tracks[i];
@@ -1616,6 +1653,41 @@ async function loadQueue(): Promise<void> {
     queueSubheader.textContent = `${tracks.length} track${tracks.length !== 1 ? 's' : ''}`;
     queueTracksEl.innerHTML = '';
 
+    // Queue action buttons row (at top)
+    const btnRow = document.createElement('div');
+    btnRow.className = 'queue-actions-row';
+
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'save-queue-btn';
+    saveBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M17 3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V7l-4-4zm-5 16c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zm3-10H5V5h10v4z"/></svg> Save as Playlist';
+    saveBtn.addEventListener('click', () => {
+      const name = prompt('Playlist name:');
+      if (name?.trim()) {
+        rpcFire(playlist.save(name.trim()));
+        cachedPlaylists = null;
+        if (notificationsEnabled) {
+          sendNotification({ title: 'Playlist Saved', body: name.trim() });
+        }
+      }
+    });
+
+    const clearBtn = document.createElement('button');
+    clearBtn.className = 'save-queue-btn clear-queue-btn';
+    clearBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg> Clear';
+    clearBtn.addEventListener('click', () => {
+      rpcFire(player.queueClear());
+      queueTracksEl.innerHTML = '';
+      queueSubheader.textContent = '';
+      const emptyEl = document.createElement('div');
+      emptyEl.className = 'list-empty';
+      emptyEl.textContent = 'Queue cleared';
+      queueTracksEl.appendChild(emptyEl);
+    });
+
+    btnRow.appendChild(saveBtn);
+    btnRow.appendChild(clearBtn);
+    queueTracksEl.appendChild(btnRow);
+
     for (let i = 0; i < tracks.length; i++) {
       const track = tracks[i];
       const row = document.createElement('div');
@@ -1647,22 +1719,6 @@ async function loadQueue(): Promise<void> {
       row.appendChild(info);
       queueTracksEl.appendChild(row);
     }
-
-    // Save queue as playlist button
-    const saveBtn = document.createElement('button');
-    saveBtn.className = 'save-queue-btn';
-    saveBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M17 3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V7l-4-4zm-5 16c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zm3-10H5V5h10v4z"/></svg> Save as Playlist';
-    saveBtn.addEventListener('click', () => {
-      const name = prompt('Playlist name:');
-      if (name?.trim()) {
-        rpcFire(playlist.save(name.trim()));
-        cachedPlaylists = null;
-        if (notificationsEnabled) {
-          sendNotification({ title: 'Playlist Saved', body: name.trim() });
-        }
-      }
-    });
-    queueTracksEl.appendChild(saveBtn);
   } catch {
     queueSubheader.textContent = '';
     queueTracksEl.innerHTML = '';
@@ -1693,6 +1749,8 @@ navAction.addEventListener('click', () => {
     navigateTo('browse');
     loadPlaylists();
   } else if (currentView === 'detail' && currentDetailAlbumId) {
+    rpcFire(player.stop());
+    rpcFire(player.queueClear());
     rpcFire(player.queueAlbum(currentDetailAlbumId));
     navigateTo('now-playing');
   } else if (currentView === 'detail' && currentPlaylistName) {

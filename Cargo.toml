@@ -60,6 +60,9 @@ chrono = "0.4"
 anyhow = "1"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
 
+# Shuffle mode
+rand = "0.9"
+
 # HTTP audio proxy for client-side failover
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }

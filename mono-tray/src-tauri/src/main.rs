@@ -1,4 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// cocoa crate is deprecated in favor of objc2-* — suppress until migration
+#![allow(deprecated)]
+#![allow(unexpected_cfgs)]
 
 #[macro_use]
 extern crate objc;
@@ -29,7 +32,6 @@ fn set_activation_policy() {}
 fn register_panel_class() -> &'static objc::runtime::Class {
     use objc::declare::ClassDecl;
     use objc::runtime::{Class, Object, Sel, BOOL, YES};
-    use cocoa::base::id;
 
     static INIT: std::sync::Once = std::sync::Once::new();
     static mut PANEL_CLASS: Option<&'static Class> = None;

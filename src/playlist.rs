@@ -106,6 +106,11 @@ impl PlaylistHub {
         serde_json::from_str(&data)
             .map_err(|e| format!("failed to parse research '{name}': {e}"))
     }
+
+    /// Load playlist tracks for shuffle/external use
+    pub fn load_playlist_tracks(&self, name: &str) -> Option<Vec<QueuedTrack>> {
+        self.load(name).ok().map(|p| p.tracks)
+    }
 }
 
 #[plexus_macros::hub_methods(

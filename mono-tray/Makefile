@@ -32,20 +32,12 @@ app: frontend
 
 # Build, install to ~/Applications, kill old instance, and launch
 run: install-user
-	-pkill -f 'Mono Tray' 2>/dev/null; \
-	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
-		pgrep -f 'Mono Tray' >/dev/null 2>&1 || break; \
-		sleep 0.1; \
-	done
+	-osascript -e 'tell application "Mono Tray" to quit' 2>/dev/null
 	open ~/Applications/Mono\ Tray.app
 
 # Kill and relaunch installed app (no rebuild)
 restart:
-	-pkill -f 'Mono Tray' 2>/dev/null; \
-	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
-		pgrep -f 'Mono Tray' >/dev/null 2>&1 || break; \
-		sleep 0.1; \
-	done
+	-osascript -e 'tell application "Mono Tray" to quit' 2>/dev/null
 	open ~/Applications/Mono\ Tray.app
 
 # Install to /Applications (requires sudo)
@@ -61,13 +53,11 @@ install-user: app
 backend:
 	cd .. && cargo run --bin plexus-mono
 
-# Kill existing backend and restart (polls for exit, max 2s)
+# Kill existing backend and restart
+# Use -sTCP:LISTEN to target only the server, not client connections (WebKit etc.)
 backend-restart:
-	-lsof -ti :4448 | xargs kill 2>/dev/null; \
-	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
-		lsof -ti :4448 >/dev/null 2>&1 || break; \
-		sleep 0.1; \
-	done
+	-lsof -ti :4448 -sTCP:LISTEN | xargs kill 2>/dev/null; \
+	while lsof -ti :4448 -sTCP:LISTEN >/dev/null 2>&1; do :; done
 	cd .. && cargo run --bin plexus-mono
 
 # Full cycle: restart backend, regenerate clients, build & run app
@@ -82,22 +72,20 @@ BACKEND_BIN = $(abspath ../target/debug/plexus-mono)
 # Detect if server needs restart: binary changed OR binary is newer than process.
 full:
 	@cd .. && cargo build --bin plexus-mono; \
-	PID=$$(lsof -ti :4448 2>/dev/null | head -1); \
-	if [ -z "$$PID" ]; then \
+	PIDS=$$(lsof -ti :4448 -sTCP:LISTEN 2>/dev/null); \
+	if [ -z "$$PIDS" ]; then \
 		echo "Server not running — starting..."; \
 		"$(BACKEND_BIN)" & \
 		synapse-cc wait music --url ws://127.0.0.1:4448 --timeout 15; \
 	else \
+		PID=$$(echo "$$PIDS" | head -1); \
 		BIN_MOD=$$(stat -f %m "$(BACKEND_BIN)" 2>/dev/null || echo 0); \
 		PROC_START=$$(ps -p $$PID -o lstart= 2>/dev/null); \
 		PROC_EPOCH=$$(date -j -f "%a %b %d %T %Y" "$$PROC_START" +%s 2>/dev/null || echo 0); \
 		if [ "$$BIN_MOD" -gt "$$PROC_EPOCH" ]; then \
 			echo "Binary newer than running server — restarting..."; \
-			kill $$PID 2>/dev/null; \
-			for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
-				kill -0 $$PID 2>/dev/null || break; \
-				sleep 0.1; \
-			done; \
+			echo "$$PIDS" | xargs kill 2>/dev/null; \
+			while lsof -ti :4448 -sTCP:LISTEN >/dev/null 2>&1; do :; done; \
 			"$(BACKEND_BIN)" & \
 			synapse-cc wait music --url ws://127.0.0.1:4448 --timeout 15; \
 		else \

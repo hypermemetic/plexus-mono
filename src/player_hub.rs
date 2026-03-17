@@ -284,6 +284,34 @@ impl PlayerHub {
         }
     }
 
+    /// Add a track to play next (front of queue)
+    #[plexus_macros::hub_method(
+        description = "Add a track to the front of the queue (play next). Auto-starts if nothing is playing.",
+        params(
+            id = "Tidal track ID",
+            quality = "Quality: LOSSLESS (default), HI_RES_LOSSLESS, HIGH, LOW",
+            source = "Where this track was queued from (playlist name, album, etc.)"
+        )
+    )]
+    pub async fn queue_add_next(
+        &self,
+        id: u64,
+        quality: Option<String>,
+        source: Option<String>,
+    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        let quality = quality.unwrap_or_else(|| "LOSSLESS".to_string());
+        stream! {
+            match player.queue_add_next(id, &quality, source).await {
+                Ok(()) => yield MonoEvent::PlayerAck {
+                    action: "queue_add_next".to_string(),
+                    message: format!("track {id} added as play next"),
+                },
+                Err(e) => yield MonoEvent::Error { message: e },
+            }
+        }
+    }
+
     /// Add multiple tracks to the queue at once
     #[plexus_macros::hub_method(
         streaming,
@@ -329,6 +357,94 @@ impl PlayerHub {
             yield MonoEvent::PlayerAck {
                 action: "queue_clear".to_string(),
                 message: "queue cleared".to_string(),
+            };
+        }
+    }
+
+    /// Start shuffle radio mode
+    #[plexus_macros::hub_method(
+        description = "Start shuffle radio mode from given track sources. Randomly picks tracks from the pool, showing 1-2 upcoming at a time.",
+        params(
+            albums = "Album IDs to include in the shuffle pool",
+            playlists = "Playlist names to include in the shuffle pool",
+            tracks = "Explicit track IDs to include in the shuffle pool"
+        )
+    )]
+    pub async fn shuffle_start(
+        &self,
+        albums: Option<Vec<u64>>,
+        playlists: Option<Vec<String>>,
+        tracks: Option<Vec<u64>>,
+    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        let client = self.player.client().clone();
+        let playlist_hub = self.playlist.clone();
+        stream! {
+            let mut all_track_ids: Vec<u64> = Vec::new();
+
+            // Resolve albums → track IDs
+            if let Some(album_ids) = albums {
+                for album_id in album_ids {
+                    match client.album(album_id).await {
+                        Ok((_album, track_events)) => {
+                            for event in track_events {
+                                if let MonoEvent::AlbumTrack { id, .. } = event {
+                                    all_track_ids.push(id);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            yield MonoEvent::Error { message: format!("failed to resolve album {album_id}: {e}") };
+                        }
+                    }
+                }
+            }
+
+            // Resolve playlists → track IDs
+            if let Some(playlist_names) = playlists {
+                for name in playlist_names {
+                    match playlist_hub.load_playlist_tracks(&name) {
+                        Some(tracks) => {
+                            for t in tracks {
+                                all_track_ids.push(t.id);
+                            }
+                        }
+                        None => {
+                            yield MonoEvent::Error { message: format!("playlist '{name}' not found") };
+                        }
+                    }
+                }
+            }
+
+            // Add explicit track IDs
+            if let Some(track_ids) = tracks {
+                all_track_ids.extend(track_ids);
+            }
+
+            match player.shuffle_start(all_track_ids).await {
+                Ok(()) => {
+                    let (_, pool_size, _) = player.shuffle_status().await;
+                    yield MonoEvent::PlayerAck {
+                        action: "shuffle_start".to_string(),
+                        message: format!("shuffle started with {pool_size} tracks"),
+                    };
+                }
+                Err(e) => yield MonoEvent::Error { message: e },
+            }
+        }
+    }
+
+    /// Stop shuffle radio mode
+    #[plexus_macros::hub_method(
+        description = "Stop shuffle radio mode. Leaves current track playing."
+    )]
+    pub async fn shuffle_stop(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
+        let player = self.player.clone();
+        stream! {
+            player.shuffle_stop().await;
+            yield MonoEvent::PlayerAck {
+                action: "shuffle_stop".to_string(),
+                message: "shuffle stopped".to_string(),
             };
         }
     }

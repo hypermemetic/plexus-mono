@@ -109,6 +109,8 @@ pub enum MonoEvent {
         track_count: u32,
         /// Release date
         release_date: Option<String>,
+        /// Cover art UUID (construct URL: https://resources.tidal.com/images/{uuid}/640x640.jpg)
+        cover_id: Option<String>,
     },
 
     /// An artist from search results

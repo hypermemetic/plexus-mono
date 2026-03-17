@@ -397,6 +397,8 @@ impl MonoClient {
                             item["numberOfTracks"].as_u64().unwrap_or(0) as u32;
                         let release_date =
                             item["releaseDate"].as_str().map(str::to_string);
+                        let cover_id =
+                            item["cover"].as_str().map(|s| s.replace('-', "/"));
                         MonoEvent::SearchAlbum {
                             rank: rank as u32,
                             id,
@@ -404,6 +406,7 @@ impl MonoClient {
                             artist,
                             track_count,
                             release_date,
+                            cover_id,
                         }
                     })
                     .collect())

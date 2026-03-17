@@ -978,12 +978,19 @@ body {
 }
 
 /* Save queue button in queue view */
+.queue-actions-row {
+  display: flex;
+  gap: 6px;
+  margin: 8px 0;
+}
+
 .save-queue-btn {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 4px;
   height: 28px;
+  flex: 1;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg-secondary);
@@ -992,13 +999,18 @@ body {
   font-family: inherit;
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s, color 0.15s;
-  margin: 8px 0;
 }
 
 .save-queue-btn:hover, .save-queue-btn.hover {
   border-color: var(--accent);
   color: var(--accent);
   background: var(--accent-dim);
+}
+
+.clear-queue-btn:hover, .clear-queue-btn.hover {
+  border-color: #e05050;
+  color: #e05050;
+  background: rgba(224, 80, 80, 0.1);
 }
 
 /* Like button */

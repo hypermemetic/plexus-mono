@@ -115,7 +115,15 @@ async fn run_server(args: Args) -> anyhow::Result<()> {
                 .expect("failed to install SIGTERM handler");
             sigterm.recv().await;
             tracing::info!("received SIGTERM — starting graceful shutdown");
-            player.graceful_shutdown().await;
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                player.graceful_shutdown(),
+            )
+            .await
+            {
+                Ok(()) => tracing::info!("graceful shutdown complete"),
+                Err(_) => tracing::warn!("graceful shutdown timed out after 5s — forcing exit"),
+            }
             std::process::exit(0);
         });
     }
