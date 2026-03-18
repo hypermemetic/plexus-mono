@@ -4,7 +4,7 @@ forges = [
     "github",
 ]
 visibility = "public"
-large_file_threshold_kb = 200
+large_file_threshold_kb = 500
 
 [ci]
 skip_validate = false
