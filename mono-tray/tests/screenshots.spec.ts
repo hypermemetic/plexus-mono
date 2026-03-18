@@ -56,12 +56,23 @@ test.describe('Mono Tray Screenshots', () => {
     await page.setViewportSize({ width: 352, height });
     await page.goto('http://localhost:5199');
     await page.addStyleTag({ content: FORCE_VISIBLE_CSS });
+    // Ensure something is playing — if idle, pick a track from a playlist
+    try {
+      await page.locator('#title').filter({ hasNotText: 'Not Playing' }).waitFor({ timeout: 5000 });
+    } catch {
+      // Nothing playing — navigate to browse, click first playlist, play first track
+      await page.click('#nav-action');
+      await page.locator('#browse-list .list-row').first().waitFor({ timeout: 10000 });
+      await page.locator('#browse-list .list-row').first().click();
+      await page.locator('#detail-tracks .list-row').first().waitFor({ timeout: 10000 });
+      await page.locator('#detail-tracks .list-row').first().click();
+      // Navigate back to now-playing and wait for title
+      await page.locator('#title').filter({ hasNotText: 'Not Playing' }).waitFor({ timeout: 10000 });
+    }
   }
 
   test('now-playing view', async ({ page }) => {
     await setup(page, 616);
-    // Wait for track title to populate (not "Not Playing")
-    await page.locator('#title').filter({ hasNotText: 'Not Playing' }).waitFor({ timeout: 10000 });
     // Wait for cover art to fully load (src set, class applied, image decoded)
     await page.locator('#album-art.loaded').waitFor({ timeout: 30000 });
     await page.waitForFunction(() => {
@@ -74,8 +85,6 @@ test.describe('Mono Tray Screenshots', () => {
 
   test('browse view with playlists', async ({ page }) => {
     await setup(page, 616);
-    // Wait for now-playing data first (confirms WS is connected)
-    await page.locator('#title').filter({ hasNotText: 'Not Playing' }).waitFor({ timeout: 10000 });
 
     await page.click('#nav-action');
     // Wait for playlist rows to appear in the browse list
@@ -86,7 +95,6 @@ test.describe('Mono Tray Screenshots', () => {
 
   test('search results', async ({ page }) => {
     await setup(page, 616);
-    await page.locator('#title').filter({ hasNotText: 'Not Playing' }).waitFor({ timeout: 10000 });
 
     await page.click('#nav-action');
     await page.locator('#browse-list .list-row').first().waitFor({ timeout: 10000 });
@@ -104,7 +112,6 @@ test.describe('Mono Tray Screenshots', () => {
 
   test('queue view', async ({ page }) => {
     await setup(page, 616);
-    await page.locator('#title').filter({ hasNotText: 'Not Playing' }).waitFor({ timeout: 10000 });
 
     await page.click('#queue-btn');
     // Wait for queue track rows to appear
@@ -115,7 +122,6 @@ test.describe('Mono Tray Screenshots', () => {
 
   test('history view', async ({ page }) => {
     await setup(page, 616);
-    await page.locator('#title').filter({ hasNotText: 'Not Playing' }).waitFor({ timeout: 10000 });
 
     await page.click('#history-btn');
     // Wait for history track rows to appear
@@ -126,7 +132,6 @@ test.describe('Mono Tray Screenshots', () => {
 
   test('playlist detail', async ({ page }) => {
     await setup(page, 616);
-    await page.locator('#title').filter({ hasNotText: 'Not Playing' }).waitFor({ timeout: 10000 });
 
     await page.click('#nav-action');
     // Wait for playlist rows

@@ -2,7 +2,7 @@
     "version": "1",
     "synapseCC": "0.2.0",
     "hubCodegen": "0.2.0",
-    "updatedAt": "2026-03-17T00:36:01Z",
+    "updatedAt": "2026-03-18T02:14:23Z",
     "targets": {
         "generated": {
             "backend": "music",
@@ -51,16 +51,16 @@
         },
         "generated/substrate": {
             "backend": "substrate",
-            "irHash": "cf6f5e649fd5a921",
+            "irHash": "3bf2243317534ca1",
             "transport": "browser",
             "files": {
-                ".codegen-metadata.json": "19b2e621faeabcde",
-                "claudecode/client.ts": "636728ad524c17c8",
+                ".codegen-metadata.json": "906f49b9b82d5c72",
+                "claudecode/client.ts": "5d4a91a312e330d0",
                 "claudecode/index.ts": "92e376f3f4309522",
-                "claudecode/types.ts": "ebae6ad6e7aacc67",
+                "claudecode/types.ts": "d3730842f45c420f",
                 "cone/types.ts": "c11c24c1595bf7e3",
                 "index.ts": "327f942783869561",
-                "package.json": "3569daab11a0b532",
+                "package.json": "2ad0754d35a870c3",
                 "rpc.ts": "3a0b3b8295270ae7",
                 "test/bidir-smoke.test.ts": "bcd06c94f9d4c352",
                 "test/smoke.test.ts": "a295034bc894304b",

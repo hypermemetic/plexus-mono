@@ -31,14 +31,21 @@ app: frontend
 	cargo tauri build
 
 # Build, install to ~/Applications, kill old instance, and launch
+# Retry open for up to 10s to handle transient procNotFound after quit
 run: install-user
 	-osascript -e 'tell application "Mono Tray" to quit' 2>/dev/null
-	open ~/Applications/Mono\ Tray.app
+	@for i in $$(seq 1 20); do \
+		open ~/Applications/Mono\ Tray.app 2>/dev/null && exit 0; \
+		sleep 0.5; \
+	done; echo "Failed to open Mono Tray after 10s" && exit 1
 
 # Kill and relaunch installed app (no rebuild)
 restart:
 	-osascript -e 'tell application "Mono Tray" to quit' 2>/dev/null
-	open ~/Applications/Mono\ Tray.app
+	@for i in $$(seq 1 20); do \
+		open ~/Applications/Mono\ Tray.app 2>/dev/null && exit 0; \
+		sleep 0.5; \
+	done; echo "Failed to open Mono Tray after 10s" && exit 1
 
 # Install to /Applications (requires sudo)
 install: app
