@@ -14,13 +14,13 @@ use axum::response::IntoResponse;
 use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::client::MonoClient;
+use crate::provider::MusicProvider;
 use crate::storage::MonoStorage;
 use crate::types::MonoEvent;
 
 #[derive(Clone)]
 struct AudioServerState {
-    client: Arc<MonoClient>,
+    client: Arc<dyn MusicProvider>,
     storage: Arc<MonoStorage>,
 }
 
@@ -32,7 +32,7 @@ struct AudioQuery {
 /// Start the HTTP audio server on the given port.
 pub async fn start_audio_server(
     port: u16,
-    client: Arc<MonoClient>,
+    client: Arc<dyn MusicProvider>,
     storage: Arc<MonoStorage>,
 ) -> anyhow::Result<()> {
     let state = AudioServerState { client, storage };
@@ -104,11 +104,13 @@ async fn serve_audio(
     };
 
     let (url, content_type) = match &manifest {
-        MonoEvent::StreamManifest {
-            url, mime_type, ..
-        } => (url.clone(), mime_type.clone()),
+        MonoEvent::StreamManifest { url, mime_type, .. } => (url.clone(), mime_type.clone()),
         _ => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "unexpected manifest type").into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "unexpected manifest type",
+            )
+                .into_response();
         }
     };
 
@@ -123,11 +125,7 @@ async fn serve_audio(
         Ok(Ok(resp)) if resp.status().is_success() => resp,
         Ok(Ok(resp)) => {
             let status = resp.status();
-            return (
-                StatusCode::BAD_GATEWAY,
-                format!("CDN returned {status}"),
-            )
-                .into_response();
+            return (StatusCode::BAD_GATEWAY, format!("CDN returned {status}")).into_response();
         }
         Ok(Err(e)) => {
             return (StatusCode::BAD_GATEWAY, format!("CDN fetch failed: {e}")).into_response();
@@ -153,18 +151,14 @@ async fn serve_audio(
             )
                 .into_response()
         }
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            format!("CDN read failed: {e}"),
-        )
-            .into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("CDN read failed: {e}")).into_response(),
     }
 }
 
 fn mime_from_ext(ext: Option<&str>) -> String {
     match ext {
         Some("flac") => "audio/flac",
-        Some("m4a") | Some("aac") => "audio/mp4",
+        Some("m4a" | "aac") => "audio/mp4",
         Some("mp3") => "audio/mpeg",
         Some("ogg") => "audio/ogg",
         Some("wav") => "audio/wav",

@@ -14,8 +14,7 @@ impl MonoStorage {
     /// Open (or create) the SQLite database at `db_path`.
     pub async fn new(db_path: PathBuf) -> Result<Self, String> {
         if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("failed to create db dir: {e}"))?;
+            std::fs::create_dir_all(parent).map_err(|e| format!("failed to create db dir: {e}"))?;
         }
         let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
         let opts = db_url
@@ -41,11 +40,16 @@ impl MonoStorage {
         .await
         .map_err(|e| format!("migration failed: {e}"))?;
 
-        // Add source column to likes (idempotent — .ok() since SQLite has no IF NOT EXISTS for ALTER)
-        sqlx::query("ALTER TABLE likes ADD COLUMN source TEXT")
+        // Add source column to likes (idempotent — only ignore "duplicate column" errors)
+        if let Err(e) = sqlx::query("ALTER TABLE likes ADD COLUMN source TEXT")
             .execute(&self.pool)
             .await
-            .ok();
+        {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") {
+                return Err(format!("migration failed (alter likes): {msg}"));
+            }
+        }
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS downloads (
@@ -107,7 +111,10 @@ impl MonoStorage {
             .fetch_all(&self.pool)
             .await
             .map_err(|e| format!("liked_ids query failed: {e}"))?;
-        Ok(rows.iter().map(|r| r.get::<i64, _>("track_id") as u64).collect())
+        Ok(rows
+            .iter()
+            .map(|r| r.get::<i64, _>("track_id") as u64)
+            .collect())
     }
 
     /// Get all liked track IDs with their source annotation, ordered by most recently liked first.
@@ -183,15 +190,16 @@ impl MonoStorage {
             let file_path = std::path::Path::new(p);
             std::fs::remove_file(file_path).ok();
             // Prune empty parent dirs up to the music root
-            let music_root = dirs::home_dir()
-                .unwrap_or_default()
-                .join("Music/mono-tray");
+            let music_root = dirs::home_dir().unwrap_or_default().join("Music/mono-tray");
             let mut dir = file_path.parent();
             while let Some(d) = dir {
                 if d <= music_root.as_path() {
                     break;
                 }
-                if std::fs::read_dir(d).map(|mut r| r.next().is_none()).unwrap_or(false) {
+                if std::fs::read_dir(d)
+                    .map(|mut r| r.next().is_none())
+                    .unwrap_or(false)
+                {
                     std::fs::remove_dir(d).ok();
                     dir = d.parent();
                 } else {

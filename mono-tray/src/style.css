@@ -184,14 +184,11 @@ body {
   display: flex;
   flex-direction: column;
   gap: 10px;
-}
-
-#view-detail {
   overflow-y: auto;
   scrollbar-width: none;
 }
 
-#view-detail::-webkit-scrollbar {
+.view-panel::-webkit-scrollbar {
   display: none;
 }
 
@@ -543,23 +540,11 @@ body {
 #queue-tracks {
   display: flex;
   flex-direction: column;
-  overflow-y: auto;
-  max-height: 420px;
-  scrollbar-width: none;
 }
 
 #detail-tracks {
   display: flex;
   flex-direction: column;
-  overflow-y: auto;
-  max-height: 420px;
-  scrollbar-width: none;
-}
-
-#browse-list::-webkit-scrollbar,
-#queue-tracks::-webkit-scrollbar,
-#detail-tracks::-webkit-scrollbar {
-  display: none;
 }
 
 #detail-subheader,
@@ -832,13 +817,6 @@ body {
 #research-tracks {
   display: flex;
   flex-direction: column;
-  overflow-y: auto;
-  max-height: 420px;
-  scrollbar-width: none;
-}
-
-#research-tracks::-webkit-scrollbar {
-  display: none;
 }
 
 .queue-source {
@@ -977,6 +955,36 @@ body {
   background: var(--accent-dim);
 }
 
+/* Playlist sort bar */
+.sort-bar {
+  display: flex;
+  gap: 4px;
+  padding: 4px 2px 8px;
+}
+
+.sort-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-family: inherit;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.sort-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--text-secondary);
+}
+
+.sort-btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
 /* Save queue button in queue view */
 .queue-actions-row {
   display: flex;
@@ -1073,13 +1081,6 @@ body {
 #history-tracks {
   display: flex;
   flex-direction: column;
-  overflow-y: auto;
-  max-height: 420px;
-  scrollbar-width: none;
-}
-
-#history-tracks::-webkit-scrollbar {
-  display: none;
 }
 
 #history-subheader {

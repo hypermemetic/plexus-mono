@@ -1,17 +1,19 @@
 [package]
-name = "plexus-mono"
+name = "plexus-music"
 version = "0.3.0"
 edition = "2021"
-description = "Monochrome music API Plexus RPC activation — search, metadata, lyrics, and recommendations"
+description = "Generic music player library — provider traits, playback engine, queue, playlists, and RPC server"
 license = "MIT"
+authors = ["Juggernaut Labs"]
+repository = "https://github.com/juggernautlabs/plexus-music"
+homepage = "https://github.com/juggernautlabs/plexus-music"
+readme = "README.md"
+keywords = ["music", "player", "streaming", "rpc", "plexus"]
+categories = ["multimedia::audio", "network-programming"]
 
 [lib]
-name = "plexus_mono"
+name = "plexus_music"
 path = "src/lib.rs"
-
-[[bin]]
-name = "plexus-mono"
-path = "src/bin/plexus_mono.rs"
 
 [dependencies]
 # Plexus RPC framework
@@ -33,11 +35,8 @@ async-trait = "0.1"
 jsonrpsee = { version = "0.26", features = ["server", "macros"] }
 uuid = { version = "1.6", features = ["v4", "v5"] }
 
-# HTTP client for Monochrome API
+# HTTP client (needed by audio_server proxy)
 reqwest = { version = "0.13", features = ["json", "stream"] }
-
-# Base64 decoding for stream manifests
-base64 = "0.22"
 
 # Audio playback
 rodio = { version = "0.22", default-features = false, features = ["symphonia-all", "playback"] }
@@ -52,12 +51,12 @@ dirs = "6"
 # Logging
 tracing = "0.1"
 
-# Standalone server
+# Server infrastructure
 plexus-transport = "0.1.0"
-clap = { version = "4", features = ["derive", "env"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-chrono = "0.4"
 anyhow = "1"
+chrono = "0.4"
+
+# SQLite storage
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
 
 # Shuffle mode
@@ -66,3 +65,21 @@ rand = "0.9"
 # HTTP audio proxy for client-side failover
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
+
+# Tracing (needed by server.rs)
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+# Too noisy for this codebase
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+struct_excessive_bools = "allow"
+doc_markdown = "allow"
+cast_possible_wrap = "allow"

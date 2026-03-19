@@ -1,204 +1,209 @@
-# Mono Tray
+# plexus-music
 
-A macOS menu bar music player for Tidal, powered by [Plexus](https://github.com/juggernautlabs/plexus-core) RPC and the [Monochrome](https://monochrome.tf) API. Lives in your menu bar, streams lossless audio, downloads for offline, and builds playlists with AI research.
+A generic music player library for Rust. Provides the provider trait hierarchy, a full playback engine (queue, playlists, listening stats, likes, downloads), an HTTP audio proxy, and a [Plexus](https://github.com/juggernautlabs/plexus-core) RPC server harness — all provider-agnostic. Implement `MusicProvider` for your streaming backend, call `build_player()`, wire up a `DynamicHub`, and call `serve()`.
 
-<p align="center">
-  <img src="docs/screenshots/now-playing.png" width="220" alt="Now Playing" />
-  <img src="docs/screenshots/browse.png" width="220" alt="Library" />
-  <img src="docs/screenshots/search.png" width="220" alt="Search" />
-</p>
-<p align="center">
-  <img src="docs/screenshots/queue.png" width="220" alt="Queue" />
-  <img src="docs/screenshots/history.png" width="220" alt="History" />
-  <img src="docs/screenshots/playlist-detail.png" width="220" alt="Playlist Detail" />
-</p>
+## Provider Trait Hierarchy
 
-## Architecture
+Five capability traits compose into a single blanket `MusicProvider`:
 
 ```
-┌─────────────┐    WebSocket     ┌──────────────┐     HTTPS     ┌─────────────────┐
-│  Mono Tray   │ ◄──JSON-RPC──► │  plexus-mono  │ ◄──────────► │  Monochrome API  │
-│  (Tauri app) │                 │  (Rust server)│              │  (Tidal proxy)   │
-└─────────────┘                  └──────────────┘              └─────────────────┘
-     ▲                                  │
-     │ TypeScript                       │ rodio (audio)
-     │ generated clients                │ SQLite (likes, downloads)
-     │ (synapse-cc)                     │ JSON (playlists, stats, state)
+MusicStreaming    — resolve stream manifests, download tracks
+MusicMetadata    — track, album, and artist metadata lookup
+MusicSearch      — search across tracks, albums, and artists
+MusicLyrics      — fetch synced or plain lyrics
+MusicEnrichment  — cover art and recommendations
+        │
+        └──► MusicProvider  (blanket impl for any T: all five)
 ```
 
-- **Frontend**: TypeScript + Tauri 2, bundled with Bun
-- **Backend**: Rust, Plexus RPC over WebSocket (port 4448)
-- **Audio**: rodio on a dedicated OS thread (Sink is Send+Sync via Arc)
-- **Codegen**: `synapse-cc` generates typed TypeScript clients from the live backend schema
+Each trait is independently implementable. A lyrics-only integration can implement just `MusicLyrics`; a full streaming provider implements all five and automatically satisfies `MusicProvider`.
 
-## Features
+### Trait Signatures
 
-### Playback
+```rust
+#[async_trait]
+pub trait MusicStreaming: Send + Sync + 'static {
+    async fn stream_manifest(&self, id: u64, quality: &str) -> Result<MusicEvent, String>;
+    async fn download(&self, id: u64, quality: &str, path: &str)
+        -> Result<Receiver<MusicEvent>, String>;
+}
 
-- Play, pause, resume, stop, seek, next, previous
-- Lossless streaming (LOSSLESS, HI_RES_LOSSLESS, HIGH, LOW quality tiers)
-- Offline playback from local downloads
-- Volume control (0–100%) and pre-amp gain (0–4x boost)
-- Playback state persists across restarts (current track, position, queue, volume)
-- macOS Now Playing integration and media key support
+#[async_trait]
+pub trait MusicMetadata: Send + Sync + 'static {
+    async fn track_info(&self, id: u64) -> Result<MusicEvent, String>;
+    async fn album(&self, id: u64) -> Result<(MusicEvent, Vec<MusicEvent>), String>;
+    async fn artist(&self, id: u64) -> Result<MusicEvent, String>;
+}
 
-### Queue
+#[async_trait]
+pub trait MusicSearch: Send + Sync + 'static {
+    async fn search(&self, query: &str, kind: &SearchKind, limit: u32, offset: u32)
+        -> Result<Vec<MusicEvent>, String>;
+}
 
-- Add individual tracks, batch add, or queue entire albums
-- Reorder tracks via drag indices
-- Auto-starts playback when adding to an empty queue
-- Save current queue as a playlist
-- Source labels track where each queued item came from
+#[async_trait]
+pub trait MusicLyrics: Send + Sync + 'static {
+    async fn lyrics(&self, id: u64) -> Result<Vec<MusicEvent>, String>;
+}
 
-### Downloads
-
-- Download tracks to `~/Music/mono-tray/{artist}/{album}/`
-- Real-time progress ring in the UI (circular SVG fill)
-- Click to cancel mid-download
-- Downloaded tracks toggle to a delete button — click to remove file and DB entry
-- Empty artist/album directories auto-pruned on delete
-- Download state reflected in now-playing updates
-
-### Likes
-
-- Toggle heart on any track (optimistic UI with pop animation)
-- **Source annotation** — records which view or playlist a track was liked from (now-playing, queue, browse, playlist, album, etc.)
-- **Liked playlist** — auto-synced `Liked.json` replaces the old virtual list; guarded from manual CRUD (use like/unlike to modify)
-- Like state shown in now-playing stream
-
-### Playlists
-
-- Create, rename, delete playlists
-- Add/remove tracks, save queue as playlist
-- Stored as JSON in `~/.plexus/monochrome/player/playlists/`
-- Playlist picker overlay for quick "add to playlist" from any track row
-
-### AI Research
-
-Three-phase AI-powered playlist curation via Claude + web search:
-
-1. **Theme Research** — Claude searches the web to understand a music theme or query, generates 10–20 specific search terms
-2. **Catalog Search** — Executes all suggestions in parallel against the Tidal catalog, pulls album tracks, deduplicates
-3. **Curation** — Claude picks the best tracks, orders them into a thematic arc, explains each choice
-
-Results are saved with full provenance (search terms used, all found tracks, curation reasoning).
-
-### Search & Browse
-
-- Real-time search across tracks, albums, and artists with tab switching
-- Artist view shows all albums; album view shows all tracks with metadata
-- Clickable artist/album names in now-playing to navigate directly
-- Lazy-loaded cover art throughout
-
-### Listening Statistics
-
-- Per-track stats: play count, complete count, skip count, total listen time
-- Full listen log with timestamps and outcome (complete, skip, stop)
-- Top tracks and recent listens queries
-- Stats persist in `~/.plexus/monochrome/player/stats.json`
-
-### History
-
-- Previously played tracks listed most-recent-first
-- Click to replay any track from history
-
-### UI & Interactions
-
-- **Menu bar panel** — transparent, borderless, always-on-top NSPanel positioned under the tray icon
-- **View navigation** — horizontal slide transitions between Now Playing, Browse, Detail, Queue, Research, and History views
-- **Breadcrumbs** — clickable navigation path
-- **Progress scrubbing** — drag the progress bar thumb for precise seeking
-- **Hover effects** — native mouse monitoring forwarded to the webview for CSS hover states
-- **Click feedback** — brief accent flash on interactive elements
-- **Like animation** — pop/bounce keyframes on heart toggle
-- **Download progress** — circular ring that fills in real time, smooth CSS transitions
-- **Disconnect overlay** — blurred overlay with auto-reconnect when backend is unreachable
-- **Desktop notifications** — track changes, research completion, playlist creation
-- **Rolling waveform** — canvas visualization above the progress bar showing live audio peaks, with silence detection (warning after 5s of no audio)
-- **Window auto-resize** — height adjusts per view (582px now-playing, 600px browse/queue/history, 650px research)
-- **Click-away dismiss** — panel hides when clicking outside
-- **Space change dismiss** — panel hides when switching macOS Spaces
-
-### Tray Context Menu
-
-Right-click the menu bar icon for:
-
-- **Open Music Folder** — opens `~/Music/mono-tray/` in Finder
-- **Restart Server** — kills and relaunches the plexus-mono backend
-- **Restart** — restarts the app
-- **Quit** — exits
-
-## Building
-
-### Prerequisites
-
-- Rust toolchain
-- [Bun](https://bun.sh)
-- [synapse-cc](https://github.com/juggernautlabs/synapse-cc) (for codegen)
-- macOS (Tauri + native panel APIs)
-
-### Quick Start
-
-```bash
-# Start the backend
-make backend
-
-# In another terminal — full build cycle:
-# restarts backend, regenerates TS clients, builds release app, launches
-cd mono-tray
-make full
+#[async_trait]
+pub trait MusicEnrichment: Send + Sync + 'static {
+    async fn cover(&self, id: u64, size: u32) -> Result<Vec<MusicEvent>, String>;
+    async fn recommendations(&self, id: u64) -> Result<Vec<MusicEvent>, String>;
+}
 ```
 
-### Build Targets
+## Key Modules
 
-| Target | Description |
+| Module | Description |
 |--------|-------------|
-| `make full` | Restart backend + wait for readiness + codegen + build + run |
-| `make full FORCE_CODEGEN=1` | Same as above but force-regenerates TypeScript clients |
-| `make run` | Build release app, install to ~/Applications, launch |
-| `make dev` | Tauri dev server with hot reload |
-| `make backend` | Start plexus-mono on port 4448 |
-| `make backend-restart` | Kill and restart the backend |
-| `make codegen-force` | Regenerate TypeScript clients from live backend |
-| `make frontend` | Bundle TypeScript with Bun |
-| `make app` | Build native macOS .app (release) |
-| `make clean` | Remove build artifacts |
+| `provider` | Trait hierarchy (`MusicStreaming`, `MusicMetadata`, `MusicSearch`, `MusicLyrics`, `MusicEnrichment`, `MusicProvider`) |
+| `player` | Audio playback engine backed by rodio — play, pause, seek, volume, pre-amp, media keys, Now Playing OS integration |
+| `player_hub` | Plexus `Activation` wrapping the player with queue management and playlist child routing |
+| `playlist` | Persistent playlist management (JSON on disk), playlist CRUD, save-queue-as-playlist |
+| `storage` | SQLite-backed likes and download registry (`MonoStorage`) |
+| `audio_server` | HTTP audio proxy for client-side stream failover (axum, port + 2 by default) |
+| `server` | `MusicServerConfig`, `build_player()`, `serve()`, `run_main_loop()` — the server wiring entry points |
+| `types` | `MusicEvent`, `MonoEvent`, `SearchKind` — the shared event envelope types |
 
-### Data Locations
+## How to Use
 
-| What | Where |
-|------|-------|
-| Downloads | `~/Music/mono-tray/{artist}/{album}/` |
-| Playlists | `~/.plexus/monochrome/player/playlists/` |
-| Player state | `~/.plexus/monochrome/player/state.json` |
-| Listen stats | `~/.plexus/monochrome/player/stats.json` |
-| Listen log | `~/.plexus/monochrome/player/listen_log.json` |
-| Liked playlist | `~/.plexus/monochrome/player/playlists/Liked.json` |
-| Research results | `~/.plexus/monochrome/player/research/` |
-| Likes & download registry | SQLite (`~/.plexus/monochrome/player/mono.db`) |
+### 1. Implement `MusicProvider`
 
-## RPC API
+```rust
+use plexus_music::provider::{
+    MusicEnrichment, MusicLyrics, MusicMetadata, MusicSearch, MusicStreaming,
+};
+use plexus_music::types::{MusicEvent, SearchKind};
+use async_trait::async_trait;
+use tokio::sync::mpsc::Receiver;
 
-The backend exposes two Plexus hubs over WebSocket JSON-RPC 2.0:
+struct MyProvider { /* your HTTP client, auth tokens, etc. */ }
 
-**`monochrome`** (raw Tidal proxy): `track`, `album`, `artist`, `cover`, `search`, `lyrics`, `recommendations`, `stream_url`, `download`
+#[async_trait]
+impl MusicStreaming for MyProvider {
+    async fn stream_manifest(&self, id: u64, quality: &str) -> Result<MusicEvent, String> {
+        // resolve a pre-signed CDN URL for the track
+        todo!()
+    }
+    async fn download(&self, id: u64, quality: &str, path: &str)
+        -> Result<Receiver<MusicEvent>, String>
+    {
+        todo!()
+    }
+}
 
-**`player`** (stateful playback engine): `play`, `pause`, `resume`, `stop`, `seek`, `next`, `previous`, `volume`, `preamp`, `queue_add`, `queue_batch`, `queue_album`, `queue_clear`, `queue_get`, `queue_reorder`, `status`, `now_playing`, `like`, `liked_tracks`, `download_track`, `delete_download`, `stats`, `stats_top`, `stats_recent`, `history`, `history_list`, `history_clear`
+#[async_trait]
+impl MusicMetadata for MyProvider { /* ... */ }
 
-**`player.playlist`** (nested): `create`, `list`, `load`, `add`, `remove`, `save`, `rename`, `delete`, `research_save`
+#[async_trait]
+impl MusicSearch for MyProvider { /* ... */ }
 
-Use [Synapse CLI](https://github.com/juggernautlabs/synapse) to explore interactively:
+#[async_trait]
+impl MusicLyrics for MyProvider { /* ... */ }
+
+#[async_trait]
+impl MusicEnrichment for MyProvider { /* ... */ }
+
+// MyProvider now satisfies MusicProvider automatically — no extra impl needed.
+```
+
+### 2. Build the player and serve
+
+```rust
+use std::sync::Arc;
+use plexus_music::{build_player, serve, run_main_loop, MusicServerConfig};
+use plexus_core::plexus::DynamicHub;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let provider = Arc::new(MyProvider::new());
+
+    let config = MusicServerConfig {
+        hub_name: "music".into(),
+        port: 4448,
+        stdio: false,
+        mcp: false,
+        audio_port: None,                          // defaults to port + 2
+        db_path: MusicServerConfig::default_db_path(),
+    };
+
+    // Initialize storage, player engine, audio proxy, and signal handler
+    let player_hub = build_player(&config, provider.clone()).await?;
+
+    // Register your provider hub(s) alongside the built-in player hub
+    let mut hub = DynamicHub::new(&config.hub_name);
+    hub.register_hub(player_hub);
+    // hub.register_hub(my_provider_hub);   // optional: expose raw provider RPC too
+
+    // Start WebSocket server (and optional MCP HTTP server)
+    let hub = Arc::new(hub);
+    tokio::spawn(serve(&config, hub.clone()));  // or .await if this is the only task
+
+    // On macOS: runs CFRunLoop for media key / Now Playing support.
+    // On other platforms: parks the main thread.
+    run_main_loop();
+    Ok(())
+}
+```
+
+### 3. Explore the API via Synapse
+
+Once running, [Synapse CLI](https://github.com/juggernautlabs/synapse) gives you a self-documenting shell over the RPC API:
 
 ```bash
 synapse -P 4448 player status
 synapse -P 4448 player play --id 12345
-synapse -P 4448 player queue_add --id 67890 --source "from CLI"
+synapse -P 4448 player queue_add --id 67890 --source "cli"
 synapse -P 4448 player playlist list
+synapse -P 4448 player now_playing      # streaming event subscription
 ```
 
-## Architecture Docs
+## Player RPC Surface
 
-Detailed design documents live in [`docs/architecture/`](docs/architecture/):
+`PlayerHub` exposes the following methods over Plexus JSON-RPC 2.0:
 
-- [Claude Code Integration](docs/architecture/16673150175942673663_claude-code-integration.md) — two-backend architecture, AI research pipeline, streaming event protocol, Arbor tree integration
-- [NSPanel Hover Events](docs/architecture/16673278998284554495_nspanel-hover-events.md) — how mouse tracking works in non-activating NSPanel webviews via global monitor + JS polyfill
+**Playback**: `play`, `pause`, `resume`, `stop`, `seek`, `next`, `previous`, `volume`, `preamp`, `now_playing`, `status`
+
+**Queue**: `queue_add`, `queue_batch`, `queue_album`, `queue_clear`, `queue_get`, `queue_reorder`
+
+**Likes**: `like`, `liked_tracks`
+
+**Downloads**: `download_track`, `delete_download`
+
+**Statistics**: `stats`, `stats_top`, `stats_recent`
+
+**History**: `history`, `history_list`, `history_clear`
+
+**Playlists** (child hub `player.playlist`): `create`, `list`, `load`, `add`, `remove`, `save`, `rename`, `delete`
+
+## Transport Modes
+
+`MusicServerConfig` supports three transport modes:
+
+| Mode | How |
+|------|-----|
+| WebSocket (default) | `stdio: false` — listens on `ws://127.0.0.1:{port}` |
+| MCP HTTP | `mcp: true` — also serves `http://127.0.0.1:{port+1}/mcp` |
+| stdio | `stdio: true` — line-delimited JSON-RPC on stdin/stdout (MCP-compatible) |
+
+## Adding as a Dependency
+
+```toml
+[dependencies]
+plexus-music = "0.3"
+```
+
+The library depends on:
+
+- `plexus-core` / `plexus-macros` / `plexus-transport` — Plexus RPC framework
+- `tokio` — async runtime
+- `rodio` — cross-platform audio playback
+- `souvlaki` — OS media controls (Now Playing, media keys)
+- `sqlx` / SQLite — likes and download registry
+- `axum` — HTTP audio proxy
+- `serde` / `schemars` — serialization and JSON Schema generation for Plexus
+
+## License
+
+MIT

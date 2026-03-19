@@ -2,11 +2,11 @@
     "version": "1",
     "synapseCC": "0.2.0",
     "hubCodegen": "0.2.0",
-    "updatedAt": "2026-03-18T02:14:23Z",
+    "updatedAt": "2026-03-19T00:31:35Z",
     "targets": {
         "generated": {
             "backend": "music",
-            "irHash": "0b97ba9400dd97e0",
+            "irHash": "62db0039721a25c8",
             "transport": "browser",
             "files": {
                 ".codegen-metadata.json": "5e4a486ebe72ad8f",

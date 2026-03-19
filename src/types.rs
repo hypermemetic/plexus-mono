@@ -1,15 +1,18 @@
-//! Event types for the Monochrome music API activation
+//! Event types for the music player library
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Events emitted by Monochrome API activation methods
+/// Provider-agnostic alias used by the `MusicProvider` trait hierarchy.
+pub type MusicEvent = MonoEvent;
+
+/// Events emitted by music provider methods
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MonoEvent {
     /// Track metadata from /info/?id=
     Track {
-        /// Tidal track ID
+        /// Track ID
         id: u64,
         /// Track title (including version if present)
         title: String,
@@ -17,7 +20,7 @@ pub enum MonoEvent {
         artist: String,
         /// Album title
         album: String,
-        /// Tidal album ID
+        /// Album ID
         album_id: u64,
         /// Duration in seconds
         duration_secs: u64,
@@ -27,13 +30,13 @@ pub enum MonoEvent {
         release_date: Option<String>,
         /// Audio quality (e.g. "LOSSLESS", "HI_RES_LOSSLESS", "HIGH")
         audio_quality: Option<String>,
-        /// Tidal cover UUID (use with cover_url to build image URLs)
+        /// Cover art identifier
         cover_id: Option<String>,
     },
 
     /// Album metadata from /album/?id=
     Album {
-        /// Tidal album ID
+        /// Album ID
         id: u64,
         /// Album title
         title: String,
@@ -45,7 +48,7 @@ pub enum MonoEvent {
         track_count: u32,
         /// Total album duration in seconds
         duration_secs: Option<u64>,
-        /// Tidal cover UUID
+        /// Cover art identifier
         cover_id: Option<String>,
     },
 
@@ -53,7 +56,7 @@ pub enum MonoEvent {
     AlbumTrack {
         /// 1-based position in the album
         position: u32,
-        /// Tidal track ID
+        /// Track ID
         id: u64,
         /// Track title
         title: String,
@@ -67,11 +70,11 @@ pub enum MonoEvent {
 
     /// Artist information from /artist/?id=
     Artist {
-        /// Tidal artist ID
+        /// Artist ID
         id: u64,
         /// Artist name
         name: String,
-        /// Tidal picture UUID (same format as track/album artist picture field)
+        /// Picture identifier
         picture_id: Option<String>,
         /// Full cover image URL at 750x750 (directly from API response)
         cover_url: Option<String>,
@@ -81,7 +84,7 @@ pub enum MonoEvent {
     SearchTrack {
         /// 0-based rank in results
         rank: u32,
-        /// Tidal track ID
+        /// Track ID
         id: u64,
         /// Track title
         title: String,
@@ -99,7 +102,7 @@ pub enum MonoEvent {
     SearchAlbum {
         /// 0-based rank in results
         rank: u32,
-        /// Tidal album ID
+        /// Album ID
         id: u64,
         /// Album title
         title: String,
@@ -109,7 +112,7 @@ pub enum MonoEvent {
         track_count: u32,
         /// Release date
         release_date: Option<String>,
-        /// Cover art UUID (construct URL: https://resources.tidal.com/images/{uuid}/640x640.jpg)
+        /// Cover art identifier
         cover_id: Option<String>,
     },
 
@@ -117,7 +120,7 @@ pub enum MonoEvent {
     SearchArtist {
         /// 0-based rank in results
         rank: u32,
-        /// Tidal artist ID
+        /// Artist ID
         id: u64,
         /// Artist name
         name: String,
@@ -135,7 +138,7 @@ pub enum MonoEvent {
     Recommendation {
         /// 0-based rank in results
         rank: u32,
-        /// Tidal track ID
+        /// Track ID
         id: u64,
         /// Track title
         title: String,
@@ -155,7 +158,7 @@ pub enum MonoEvent {
 
     /// Resolved stream manifest from /track/?id= (use url immediately — it expires)
     StreamManifest {
-        /// Tidal track ID
+        /// Track ID
         id: u64,
         /// Pre-signed direct CDN URL — short-lived, use within seconds
         url: String,
@@ -227,7 +230,7 @@ pub enum MonoEvent {
         preamp: f32,
         /// Number of tracks in queue
         queue_length: usize,
-        /// Monochrome web URL for the current track
+        /// Web URL for the current track
         url: Option<String>,
         /// Whether the current track is liked
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -286,7 +289,7 @@ pub enum MonoEvent {
 
     /// Per-track listening statistics
     TrackStats {
-        /// Tidal track ID
+        /// Track ID
         id: u64,
         /// Track title
         title: String,
@@ -310,7 +313,7 @@ pub enum MonoEvent {
 
     /// Individual listen log entry
     ListenEvent {
-        /// Tidal track ID
+        /// Track ID
         track_id: u64,
         /// ISO 8601 timestamp when playback started
         started_at: String,
@@ -364,7 +367,7 @@ pub enum PlayStatus {
 /// A track in the playback queue
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct QueuedTrack {
-    /// Tidal track ID
+    /// Track ID
     pub id: u64,
     /// Track title
     pub title: String,
@@ -384,21 +387,16 @@ pub struct QueuedTrack {
 }
 
 /// Search target kind
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchKind {
     /// Search for tracks (default)
+    #[default]
     Tracks,
     /// Search for albums
     Albums,
     /// Search for artists
     Artists,
-}
-
-impl Default for SearchKind {
-    fn default() -> Self {
-        SearchKind::Tracks
-    }
 }
 
 /// How a listen session ended
@@ -416,7 +414,7 @@ pub enum ListenOutcome {
 /// Aggregate per-track listening statistics
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TrackStats {
-    /// Tidal track ID
+    /// Track ID
     pub id: u64,
     /// Track title
     pub title: String,
@@ -441,7 +439,7 @@ pub struct TrackStats {
 /// Individual listen log entry
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ListenEvent {
-    /// Tidal track ID
+    /// Track ID
     pub track_id: u64,
     /// ISO 8601 timestamp when playback started
     pub started_at: String,

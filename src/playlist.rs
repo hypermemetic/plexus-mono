@@ -15,8 +15,8 @@ use plexus_core::Activation;
 
 use serde_json::Value;
 
-use crate::client::MonoClient;
 use crate::player::Player;
+use crate::provider::MusicProvider;
 use crate::types::{MonoEvent, QueuedTrack};
 
 /// On-disk playlist format
@@ -34,12 +34,12 @@ pub struct PlaylistData {
 #[derive(Clone)]
 pub struct PlaylistHub {
     player: Arc<Player>,
-    client: Arc<MonoClient>,
+    client: Arc<dyn MusicProvider>,
     data_dir: PathBuf,
 }
 
 impl PlaylistHub {
-    pub fn new(player: Arc<Player>, client: Arc<MonoClient>) -> Self {
+    pub fn new(player: Arc<Player>, client: Arc<dyn MusicProvider>) -> Self {
         let data_dir = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".plexus/monochrome/player/playlists");
@@ -63,8 +63,7 @@ impl PlaylistHub {
         let path = self.playlist_path(name);
         let data = std::fs::read_to_string(&path)
             .map_err(|e| format!("playlist '{name}' not found: {e}"))?;
-        serde_json::from_str(&data)
-            .map_err(|e| format!("failed to parse playlist '{name}': {e}"))
+        serde_json::from_str(&data).map_err(|e| format!("failed to parse playlist '{name}': {e}"))
     }
 
     fn write_playlist(&self, data: &PlaylistData) -> Result<(), String> {
@@ -72,8 +71,7 @@ impl PlaylistHub {
         let path = self.playlist_path(&data.name);
         let json = serde_json::to_string_pretty(data)
             .map_err(|e| format!("failed to serialize playlist: {e}"))?;
-        std::fs::write(&path, json)
-            .map_err(|e| format!("failed to write playlist: {e}"))
+        std::fs::write(&path, json).map_err(|e| format!("failed to write playlist: {e}"))
     }
 
     fn now_iso() -> String {
@@ -81,7 +79,10 @@ impl PlaylistHub {
     }
 
     fn research_dir(&self) -> PathBuf {
-        self.data_dir.parent().unwrap_or(&self.data_dir).join("research")
+        self.data_dir
+            .parent()
+            .unwrap_or(&self.data_dir)
+            .join("research")
     }
 
     fn research_path(&self, name: &str) -> PathBuf {
@@ -90,21 +91,18 @@ impl PlaylistHub {
 
     fn write_research(&self, name: &str, data: &Value) -> Result<(), String> {
         let dir = self.research_dir();
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| format!("failed to create research dir: {e}"))?;
+        std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create research dir: {e}"))?;
         let path = self.research_path(name);
         let json = serde_json::to_string_pretty(data)
             .map_err(|e| format!("failed to serialize research: {e}"))?;
-        std::fs::write(&path, json)
-            .map_err(|e| format!("failed to write research: {e}"))
+        std::fs::write(&path, json).map_err(|e| format!("failed to write research: {e}"))
     }
 
     fn load_research(&self, name: &str) -> Result<Value, String> {
         let path = self.research_path(name);
         let data = std::fs::read_to_string(&path)
             .map_err(|e| format!("research '{name}' not found: {e}"))?;
-        serde_json::from_str(&data)
-            .map_err(|e| format!("failed to parse research '{name}': {e}"))
+        serde_json::from_str(&data).map_err(|e| format!("failed to parse research '{name}': {e}"))
     }
 
     /// Load playlist tracks for shuffle/external use
@@ -113,6 +111,7 @@ impl PlaylistHub {
     }
 }
 
+#[allow(clippy::unused_async)]
 #[plexus_macros::hub_methods(
     namespace = "playlist",
     version = "0.1.0",
@@ -127,7 +126,7 @@ impl PlaylistHub {
         params(
             name = "Playlist name",
             description = "Optional description of the playlist",
-            ids = "Optional list of Tidal track IDs to populate the playlist with",
+            ids = "Optional list of track IDs to populate the playlist with",
             quality = "Quality tier for track metadata (default LOSSLESS)"
         )
     )]
@@ -244,10 +243,7 @@ impl PlaylistHub {
         description = "Get full playlist details: name, description, track count, timestamps, then all tracks",
         params(name = "Playlist name")
     )]
-    pub async fn show(
-        &self,
-        name: String,
-    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
+    pub async fn show(&self, name: String) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let hub = self.clone();
         stream! {
             match hub.load(&name) {
@@ -274,10 +270,7 @@ impl PlaylistHub {
         description = "Delete a saved playlist",
         params(name = "Playlist name")
     )]
-    pub async fn delete(
-        &self,
-        name: String,
-    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
+    pub async fn delete(&self, name: String) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let hub = self.clone();
         stream! {
             if name == "Liked" {
@@ -300,10 +293,7 @@ impl PlaylistHub {
     /// Rename a playlist
     #[plexus_macros::hub_method(
         description = "Rename a playlist",
-        params(
-            name = "Current playlist name",
-            new_name = "New playlist name"
-        )
+        params(name = "Current playlist name", new_name = "New playlist name")
     )]
     pub async fn rename(
         &self,
@@ -326,7 +316,7 @@ impl PlaylistHub {
                     }
                     // Remove old file
                     let _ = std::fs::remove_file(hub.playlist_path(&name));
-                    data.name = new_name.clone();
+                    data.name.clone_from(&new_name);
                     data.updated_at = Self::now_iso();
                     match hub.write_playlist(&data) {
                         Ok(()) => yield MonoEvent::PlayerAck {
@@ -346,7 +336,7 @@ impl PlaylistHub {
         description = "Fetch track info and append to a playlist",
         params(
             name = "Playlist name",
-            id = "Tidal track ID",
+            id = "Track ID",
             quality = "Quality tier (default LOSSLESS)"
         )
     )]
@@ -400,10 +390,7 @@ impl PlaylistHub {
     /// Remove a track from a playlist by index
     #[plexus_macros::hub_method(
         description = "Remove a track at a given index from a playlist",
-        params(
-            name = "Playlist name",
-            index = "0-based index of the track to remove"
-        )
+        params(name = "Playlist name", index = "0-based index of the track to remove")
     )]
     pub async fn remove(
         &self,
@@ -442,10 +429,7 @@ impl PlaylistHub {
     /// Set or update a playlist's description
     #[plexus_macros::hub_method(
         description = "Set or update the description of a playlist",
-        params(
-            name = "Playlist name",
-            description = "New description text"
-        )
+        params(name = "Playlist name", description = "New description text")
     )]
     pub async fn describe(
         &self,
@@ -521,10 +505,7 @@ impl PlaylistHub {
         description = "Load playlist tracks into the playback queue and start playing",
         params(name = "Playlist name")
     )]
-    pub async fn play(
-        &self,
-        name: String,
-    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
+    pub async fn play(&self, name: String) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let hub = self.clone();
         stream! {
             let data = match hub.load(&name) {
@@ -561,10 +542,7 @@ impl PlaylistHub {
         description = "Save the current playback queue as a named playlist (creates or overwrites)",
         params(name = "Playlist name")
     )]
-    pub async fn save(
-        &self,
-        name: String,
-    ) -> impl Stream<Item = MonoEvent> + Send + 'static {
+    pub async fn save(&self, name: String) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let hub = self.clone();
         stream! {
             let (current, upcoming) = hub.player.queue_get().await;
@@ -647,6 +625,7 @@ impl PlaylistHub {
 
 #[async_trait]
 impl ChildRouter for PlaylistHub {
+    #[allow(clippy::unnecessary_literal_bound)]
     fn router_namespace(&self) -> &str {
         "playlist"
     }

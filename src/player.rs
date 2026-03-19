@@ -1,7 +1,7 @@
 //! Playback engine — dedicated audio thread with queue management
 //!
-//! All rodio interaction is isolated to a single OS thread (OutputStream is !Send).
-//! The Sink is Send+Sync and shared via Arc for control from async code.
+//! All rodio interaction is isolated to a single OS thread (`OutputStream` is !Send).
+//! The Sink is `Send+Sync` and shared via Arc for control from async code.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -15,8 +15,8 @@ use tokio::sync::{watch, Mutex};
 
 use stream_download::source::SourceStream;
 
-use crate::client::MonoClient;
 use crate::playlist::PlaylistData;
+use crate::provider::MusicProvider;
 use crate::storage::MonoStorage;
 use crate::types::{ListenEvent, ListenOutcome, MonoEvent, PlayStatus, QueuedTrack, TrackStats};
 
@@ -30,7 +30,7 @@ pub struct PlayerState {
     pub volume: f32,
     #[serde(default = "default_preamp")]
     pub preamp: f32,
-    /// Set by graceful_shutdown() — signals restore_state() to auto-resume playback
+    /// Set by `graceful_shutdown()` — signals `restore_state()` to auto-resume playback
     #[serde(default)]
     pub was_playing: bool,
 }
@@ -55,10 +55,14 @@ impl PlayerState {
     pub fn save(&self) {
         let path = Self::state_path();
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::warn!("failed to create directory {}: {e}", parent.display());
+            }
         }
         if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(&path, json);
+            if let Err(e) = std::fs::write(&path, &json) {
+                tracing::warn!("failed to write state to {}: {e}", path.display());
+            }
         }
     }
 }
@@ -97,17 +101,21 @@ impl StatsStore {
     }
 
     fn save(&self) {
-        fn save_json(path: PathBuf, json: &str) {
+        fn save_json(path: &std::path::Path, json: &str) {
             if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    tracing::warn!("failed to create directory {}: {e}", parent.display());
+                }
             }
-            let _ = std::fs::write(&path, json);
+            if let Err(e) = std::fs::write(path, json) {
+                tracing::warn!("failed to write state to {}: {e}", path.display());
+            }
         }
         if let Ok(json) = serde_json::to_string_pretty(&self.stats) {
-            save_json(Self::stats_path(), &json);
+            save_json(&Self::stats_path(), &json);
         }
         if let Ok(json) = serde_json::to_string_pretty(&self.listen_log) {
-            save_json(Self::log_path(), &json);
+            save_json(&Self::log_path(), &json);
         }
     }
 
@@ -127,11 +135,11 @@ impl StatsStore {
             last_played: now.clone(),
         });
         entry.play_count += 1;
-        entry.last_played = now.clone();
+        entry.last_played.clone_from(&now);
         // Update metadata in case it changed
-        entry.title = track.title.clone();
-        entry.artist = track.artist.clone();
-        entry.album = track.album.clone();
+        entry.title.clone_from(&track.title);
+        entry.artist.clone_from(&track.artist);
+        entry.album.clone_from(&track.album);
         self.save();
         now
     }
@@ -196,7 +204,8 @@ struct LevelMonitor<S> {
 impl<S: rodio::Source<Item = f32>> LevelMonitor<S> {
     fn new(source: S, peak_atom: Arc<AtomicU32>) -> Self {
         // ~33ms window: sample_rate * channels / 30
-        let window_size = (source.sample_rate().get() as usize * source.channels().get() as usize) / 30;
+        let window_size =
+            (source.sample_rate().get() as usize * source.channels().get() as usize) / 30;
         Self {
             inner: source,
             peak_atom,
@@ -301,18 +310,26 @@ struct ShufflePool {
 
 impl ShufflePool {
     fn new() -> Self {
-        Self { track_pool: Vec::new(), played: HashSet::new(), active: false }
+        Self {
+            track_pool: Vec::new(),
+            played: HashSet::new(),
+            active: false,
+        }
     }
 
     fn pick_next(&mut self) -> Option<u64> {
-        let available: Vec<u64> = self.track_pool.iter()
+        let available: Vec<u64> = self
+            .track_pool
+            .iter()
             .copied()
             .filter(|id| !self.played.contains(id))
             .collect();
         if available.is_empty() {
             // All played — reset and re-pick
             self.played.clear();
-            if self.track_pool.is_empty() { return None; }
+            if self.track_pool.is_empty() {
+                return None;
+            }
             let idx = rand::random_range(0..self.track_pool.len());
             let id = self.track_pool[idx];
             self.played.insert(id);
@@ -383,7 +400,7 @@ pub struct Player {
     storage: Arc<MonoStorage>,
     now_playing_tx: watch::Sender<NowPlaying>,
     now_playing_rx: watch::Receiver<NowPlaying>,
-    client: Arc<MonoClient>,
+    client: Arc<dyn MusicProvider>,
     audio_peak: Arc<AtomicU32>,
     peak_history: Arc<Mutex<PeakHistory>>,
     // Dropping this signals the audio thread to exit
@@ -392,13 +409,19 @@ pub struct Player {
 
 impl Player {
     /// Create a new Player. Spawns a dedicated audio thread and background watchers.
-    pub async fn new(client: Arc<MonoClient>, storage: Arc<MonoStorage>) -> Arc<Self> {
+    #[allow(clippy::too_many_lines)]
+    pub async fn new(client: Arc<dyn MusicProvider>, storage: Arc<MonoStorage>) -> Arc<Self> {
         let (sink_tx, sink_rx) = std::sync::mpsc::channel();
         let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
 
         std::thread::spawn(move || {
-            let mut stream = rodio::DeviceSinkBuilder::open_default_sink()
-                .expect("failed to open default audio output device");
+            let mut stream = match rodio::DeviceSinkBuilder::open_default_sink() {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("failed to open default audio output device: {e}");
+                    return;
+                }
+            };
             stream.log_on_drop(false);
             let sink = rodio::Player::connect_new(stream.mixer());
             let _ = sink_tx.send(sink);
@@ -477,16 +500,27 @@ impl Player {
                     continue;
                 }
                 let mut inner = this.inner.lock().await;
-                let should_advance = matches!(inner.status, PlayStatus::Playing | PlayStatus::Failed);
+                let should_advance =
+                    matches!(inner.status, PlayStatus::Playing | PlayStatus::Failed);
                 if should_advance {
                     // Track ended naturally or failed — record completion if it was playing
                     if matches!(inner.status, PlayStatus::Playing) {
-                        let listen_info = inner.current_track.as_ref().map(|t| (t.id, t.duration_secs as f32));
+                        let listen_info = inner
+                            .current_track
+                            .as_ref()
+                            .map(|t| (t.id, t.duration_secs as f32));
                         let started_at = inner.listen_started_at.take();
-                        if let (Some((track_id, duration)), Some(started_at)) = (listen_info, started_at) {
+                        if let (Some((track_id, duration)), Some(started_at)) =
+                            (listen_info, started_at)
+                        {
                             drop(inner);
                             let mut stats = this.stats.lock().await;
-                            stats.record_end(track_id, &started_at, duration, ListenOutcome::Complete);
+                            stats.record_end(
+                                track_id,
+                                &started_at,
+                                duration,
+                                ListenOutcome::Complete,
+                            );
                             drop(stats);
                             inner = this.inner.lock().await;
                         }
@@ -543,12 +577,11 @@ impl Player {
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 let Some(this) = weak.upgrade() else { break };
                 let acquire_start = tokio::time::Instant::now();
-                let result =
-                    tokio::time::timeout(Duration::from_secs(3), this.inner.lock()).await;
+                let result = tokio::time::timeout(Duration::from_secs(3), this.inner.lock()).await;
                 match result {
-                    Ok(_guard) => {
+                    Ok(guard) => {
                         let elapsed = acquire_start.elapsed();
-                        drop(_guard);
+                        drop(guard);
                         if elapsed > Duration::from_secs(1) {
                             tracing::warn!(
                                 "lock watchdog: lock acquired after {:.1}s (slow)",
@@ -583,6 +616,7 @@ impl Player {
     /// Wire up macOS Now Playing / media key integration via souvlaki.
     /// Spawns a dedicated thread that owns MediaControls and polls for
     /// metadata updates from the watch channel.
+    #[allow(clippy::too_many_lines)]
     fn setup_media_controls(self: &Arc<Self>) {
         use souvlaki::{
             MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition,
@@ -593,7 +627,7 @@ impl Player {
         let weak = Arc::downgrade(self);
         let mut np_rx = self.subscribe_now_playing();
 
-        std::thread::Builder::new()
+        if let Err(e) = std::thread::Builder::new()
             .name("media-controls".into())
             .spawn(move || {
                 let config = PlatformConfig {
@@ -672,11 +706,8 @@ impl Player {
 
                     let np = np_rx.borrow_and_update().clone();
 
-                    // Build cover art URL from Tidal cover UUID
-                    let cover_url = np.title.as_ref().and_then(|_| {
-                        // We don't have cover_id in NowPlaying, so skip for now
-                        None::<String>
-                    });
+                    // We don't have cover_id in NowPlaying, so skip for now
+                    let cover_url: Option<String> = None;
 
                     let _ = controls.set_metadata(MediaMetadata {
                         title: np.title.as_deref(),
@@ -706,14 +737,27 @@ impl Player {
                     let _ = controls.set_playback(playback);
                 }
             })
-            .expect("failed to spawn media-controls thread");
+        {
+            tracing::warn!("media controls unavailable: {e}");
+        }
     }
 
     /// Broadcast current state through the watch channel.
     /// Lock is held only briefly to snapshot state — storage I/O happens outside.
     async fn broadcast_now_playing(&self) {
         // Snapshot everything we need under the lock, then drop it
-        let (track_id, title, artist, album, status, duration_secs, volume, preamp, queue_length, url) = {
+        let (
+            track_id,
+            title,
+            artist,
+            album,
+            status,
+            duration_secs,
+            volume,
+            preamp,
+            queue_length,
+            url,
+        ) = {
             let inner = self.inner.lock().await;
             (
                 inner.current_track.as_ref().map(|t| t.id),
@@ -721,11 +765,17 @@ impl Player {
                 inner.current_track.as_ref().map(|t| t.artist.clone()),
                 inner.current_track.as_ref().map(|t| t.album.clone()),
                 inner.status.clone(),
-                inner.current_track.as_ref().map(|t| t.duration_secs as f32).unwrap_or(0.0),
+                inner
+                    .current_track
+                    .as_ref()
+                    .map_or(0.0, |t| t.duration_secs as f32),
                 inner.volume,
                 inner.preamp,
                 inner.queue.len(),
-                inner.current_track.as_ref().map(|t| format!("https://monochrome.tf/track/t/{}", t.id)),
+                inner
+                    .current_track
+                    .as_ref()
+                    .map(|t| format!("https://monochrome.tf/track/t/{}", t.id)),
             )
         };
         // Storage I/O outside the lock — no mutex contention
@@ -884,7 +934,9 @@ impl Player {
             self.client.stream_manifest(track.id, &track.quality),
         )
         .await
-        .map_err(|_| "stream manifest timed out (10s) — Tidal session may have expired".to_string())?
+        .map_err(|_| {
+            "stream manifest timed out (10s) — provider session may have expired".to_string()
+        })?
         .map_err(|e| format!("stream manifest error: {e}"))?;
         let url = match &manifest {
             MonoEvent::StreamManifest { url, .. } => url.clone(),
@@ -894,10 +946,9 @@ impl Player {
         // Create streaming reader (with timeout)
         let http_stream = tokio::time::timeout(
             Duration::from_secs(15),
-            stream_download::http::HttpStream::<
-                stream_download::http::reqwest::Client,
-            >::create(
-                url.parse::<reqwest::Url>().map_err(|e| format!("bad stream url: {e}"))?
+            stream_download::http::HttpStream::<stream_download::http::reqwest::Client>::create(
+                url.parse::<reqwest::Url>()
+                    .map_err(|e| format!("bad stream url: {e}"))?,
             ),
         )
         .await
@@ -1074,7 +1125,12 @@ impl Player {
         self.queue_add_with_source(id, quality, None).await
     }
 
-    pub async fn queue_add_with_source(&self, id: u64, quality: &str, source: Option<String>) -> Result<(), String> {
+    pub async fn queue_add_with_source(
+        &self,
+        id: u64,
+        quality: &str,
+        source: Option<String>,
+    ) -> Result<(), String> {
         let track_info = self.client.track_info(id).await.ok();
         let mut queued = make_queued_track(id, quality, track_info);
         queued.source = source;
@@ -1102,7 +1158,12 @@ impl Player {
     }
 
     /// Add a track to the front of the queue (play next). Auto-starts if idle.
-    pub async fn queue_add_next(&self, id: u64, quality: &str, source: Option<String>) -> Result<(), String> {
+    pub async fn queue_add_next(
+        &self,
+        id: u64,
+        quality: &str,
+        source: Option<String>,
+    ) -> Result<(), String> {
         let track_info = self.client.track_info(id).await.ok();
         let mut queued = make_queued_track(id, quality, track_info);
         queued.source = source;
@@ -1129,12 +1190,23 @@ impl Player {
     }
 
     /// Add all tracks from an album to the queue. Auto-starts if idle.
-    pub async fn queue_album(&self, album_id: u64, quality: &str) -> Result<Vec<QueuedTrack>, String> {
-        let (_album_event, track_events) = self.client.album(album_id).await?;
+    pub async fn queue_album(
+        &self,
+        album_id: u64,
+        quality: &str,
+    ) -> Result<Vec<QueuedTrack>, String> {
+        let (album_event, track_events) = self.client.album(album_id).await?;
 
         let mut queued_tracks = Vec::new();
         for event in &track_events {
-            if let MonoEvent::AlbumTrack { id, title, artist, duration_secs, .. } = event {
+            if let MonoEvent::AlbumTrack {
+                id,
+                title,
+                artist,
+                duration_secs,
+                ..
+            } = event
+            {
                 queued_tracks.push(QueuedTrack {
                     id: *id,
                     title: title.clone(),
@@ -1149,10 +1221,13 @@ impl Player {
         }
 
         // Get album name from the album event
-        let album_name = if let MonoEvent::Album { title, cover_id, .. } = &_album_event {
+        let album_name = if let MonoEvent::Album {
+            title, cover_id, ..
+        } = &album_event
+        {
             for t in &mut queued_tracks {
-                t.album = title.clone();
-                t.cover_id = cover_id.clone();
+                t.album.clone_from(title);
+                t.cover_id.clone_from(cover_id);
             }
             title.clone()
         } else {
@@ -1190,20 +1265,27 @@ impl Player {
     }
 
     /// Add multiple tracks to the queue at once. Auto-starts if idle.
-    pub async fn queue_batch(&self, ids: &[u64], quality: &str) -> Result<Vec<QueuedTrack>, String> {
+    pub async fn queue_batch(
+        &self,
+        ids: &[u64],
+        quality: &str,
+    ) -> Result<Vec<QueuedTrack>, String> {
         if ids.is_empty() {
             return Err("no track IDs provided".into());
         }
 
         // Resolve all track metadata in parallel
-        let futs: Vec<_> = ids.iter().map(|&id| {
-            let client = self.client.clone();
-            let q = quality.to_string();
-            async move {
-                let info = client.track_info(id).await.ok();
-                make_queued_track(id, &q, info)
-            }
-        }).collect();
+        let futs: Vec<_> = ids
+            .iter()
+            .map(|&id| {
+                let client = self.client.clone();
+                let q = quality.to_string();
+                async move {
+                    let info = client.track_info(id).await.ok();
+                    make_queued_track(id, &q, info)
+                }
+            })
+            .collect();
         let tracks: Vec<QueuedTrack> = futures::future::join_all(futs).await;
 
         let should_start = {
@@ -1260,7 +1342,10 @@ impl Player {
                 inner.queue.len()
             ));
         }
-        let track = inner.queue.remove(from).unwrap();
+        let track = inner
+            .queue
+            .remove(from)
+            .ok_or_else(|| "queue index out of bounds".to_string())?;
         inner.queue.insert(to, track);
         Ok(())
     }
@@ -1295,9 +1380,8 @@ impl Player {
                     MonoEvent::StreamManifest { url, .. } => url.clone(),
                     _ => return,
                 };
-                let parsed = match url.parse::<reqwest::Url>() {
-                    Ok(u) => u,
-                    Err(_) => return,
+                let Ok(parsed) = url.parse::<reqwest::Url>() else {
+                    return;
                 };
 
                 // Start download with content_length extraction
@@ -1329,12 +1413,18 @@ impl Player {
 
                 tracing::debug!("prefetched track {} ({})", track.id, track.title);
                 let mut inner = self.inner.lock().await;
-                inner.prefetched.insert(track.id, (Box::new(reader), content_length));
+                inner
+                    .prefetched
+                    .insert(track.id, (Box::new(reader), content_length));
             })
             .await;
 
             if result.is_err() {
-                tracing::warn!("prefetch timed out for track {} ({})", track.id, track.title);
+                tracing::warn!(
+                    "prefetch timed out for track {} ({})",
+                    track.id,
+                    track.title
+                );
             }
         }
     }
@@ -1434,9 +1524,7 @@ impl Player {
                     Ok(()) => {
                         // Seek to saved position
                         if resume_pos > 1.0 {
-                            if let Err(e) = self
-                                .sink
-                                .try_seek(Duration::from_secs_f32(resume_pos))
+                            if let Err(e) = self.sink.try_seek(Duration::from_secs_f32(resume_pos))
                             {
                                 tracing::warn!("seek to resume position failed: {e}");
                             }
@@ -1511,13 +1599,17 @@ impl Player {
         &self.storage
     }
 
-    /// Get a reference to the HTTP client
-    pub fn client(&self) -> &Arc<MonoClient> {
+    /// Get a reference to the music provider
+    pub fn client(&self) -> &Arc<dyn MusicProvider> {
         &self.client
     }
 
     /// Toggle like on a track. Returns new liked state.
-    pub async fn toggle_like(self: &Arc<Self>, track_id: u64, source: Option<String>) -> Result<bool, String> {
+    pub async fn toggle_like(
+        self: &Arc<Self>,
+        track_id: u64,
+        source: Option<String>,
+    ) -> Result<bool, String> {
         let result = self.storage.toggle_like(track_id, source).await?;
         self.broadcast_now_playing().await;
         let this = self.clone();
@@ -1554,18 +1646,38 @@ impl Player {
         let mut tracks = Vec::with_capacity(liked.len());
         for (id, source) in &liked {
             if let Some(mut cached) = existing.get(id).cloned() {
-                cached.source = source.clone();
+                cached.source.clone_from(source);
                 tracks.push(cached);
             } else {
                 // Fetch metadata for new likes
                 let info = self.client.track_info(*id).await.ok();
                 let queued = match info {
-                    Some(MonoEvent::Track { title, artist, album, duration_secs, cover_id, .. }) => {
-                        QueuedTrack { id: *id, title, artist, album, duration_secs, quality: "LOSSLESS".into(), cover_id, source: source.clone() }
-                    }
+                    Some(MonoEvent::Track {
+                        title,
+                        artist,
+                        album,
+                        duration_secs,
+                        cover_id,
+                        ..
+                    }) => QueuedTrack {
+                        id: *id,
+                        title,
+                        artist,
+                        album,
+                        duration_secs,
+                        quality: "LOSSLESS".into(),
+                        cover_id,
+                        source: source.clone(),
+                    },
                     _ => QueuedTrack {
-                        id: *id, title: format!("Track {id}"), artist: String::new(),
-                        album: String::new(), duration_secs: 0, quality: "LOSSLESS".into(), cover_id: None, source: source.clone(),
+                        id: *id,
+                        title: format!("Track {id}"),
+                        artist: String::new(),
+                        album: String::new(),
+                        duration_secs: 0,
+                        quality: "LOSSLESS".into(),
+                        cover_id: None,
+                        source: source.clone(),
                     },
                 };
                 tracks.push(queued);
@@ -1607,10 +1719,17 @@ impl Player {
         // Get track info for organized path
         let track_info = self.client.track_info(id).await.ok();
         let (title, artist, album) = match &track_info {
-            Some(MonoEvent::Track { title, artist, album, .. }) => {
-                (title.clone(), artist.clone(), album.clone())
-            }
-            _ => (format!("Track {id}"), String::from("Unknown"), String::from("Unknown")),
+            Some(MonoEvent::Track {
+                title,
+                artist,
+                album,
+                ..
+            }) => (title.clone(), artist.clone(), album.clone()),
+            _ => (
+                format!("Track {id}"),
+                String::from("Unknown"),
+                String::from("Unknown"),
+            ),
         };
 
         // Get stream manifest for extension
@@ -1624,7 +1743,7 @@ impl Player {
         let base = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Music/mono-tray");
-        let sanitize = |s: &str| s.replace('/', "_").replace('\\', "_").replace(':', "_");
+        let sanitize = |s: &str| s.replace(['/', '\\', ':'], "_");
         let dir = base.join(sanitize(&artist)).join(sanitize(&album));
         std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir failed: {e}"))?;
         let path = dir.join(format!("{}.{}", sanitize(&title), ext));
@@ -1648,7 +1767,8 @@ impl Player {
                     return;
                 }
                 if is_complete {
-                    let _ = player.storage
+                    let _ = player
+                        .storage
                         .register_download(
                             id,
                             &path_str,
@@ -1723,7 +1843,9 @@ impl Player {
     async fn shuffle_refill(&self) {
         let ids_to_add: Vec<u64> = {
             let mut inner = self.inner.lock().await;
-            if !inner.shuffle.active { return; }
+            if !inner.shuffle.active {
+                return;
+            }
             let needed = 2usize.saturating_sub(inner.queue.len());
             let mut ids = Vec::new();
             for _ in 0..needed {
@@ -1750,7 +1872,11 @@ impl Player {
     /// Get shuffle pool info for status display
     pub async fn shuffle_status(&self) -> (bool, usize, usize) {
         let inner = self.inner.lock().await;
-        (inner.shuffle.active, inner.shuffle.track_pool.len(), inner.shuffle.played.len())
+        (
+            inner.shuffle.active,
+            inner.shuffle.track_pool.len(),
+            inner.shuffle.played.len(),
+        )
     }
 }
 

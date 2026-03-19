@@ -362,30 +362,31 @@ fn main() {
                             let handle = app.clone();
                             std::thread::spawn(move || {
                                 std::thread::sleep(std::time::Duration::from_millis(500));
-                                let _ = std::process::Command::new("cargo")
-                                    .args(["run", "--bin", "plexus-mono"])
-                                    .current_dir(
-                                        std::env::current_exe()
-                                            .ok()
-                                            .and_then(|p| {
-                                                // Walk up from the .app bundle to find the repo
-                                                let mut dir = p.parent()?.to_path_buf();
-                                                while dir.pop() {
-                                                    if dir.join("Cargo.toml").exists()
-                                                        && dir.join("src/bin/plexus_mono.rs").exists()
-                                                    {
-                                                        return Some(dir);
-                                                    }
+                                // Try the installed binary first; fall back to cargo run in mono-provider
+                                let spawned = std::process::Command::new("plexus-mono").spawn();
+                                if spawned.is_err() {
+                                    let mono_provider_dir = std::env::current_exe()
+                                        .ok()
+                                        .and_then(|p| {
+                                            // Walk up from the .app bundle to find mono-provider/
+                                            let mut dir = p.parent()?.to_path_buf();
+                                            while dir.pop() {
+                                                if dir.join("mono-provider/Cargo.toml").exists() {
+                                                    return Some(dir.join("mono-provider"));
                                                 }
-                                                None
-                                            })
-                                            .unwrap_or_else(|| {
-                                                dirs::home_dir()
-                                                    .unwrap_or_default()
-                                                    .join("dev/controlflow/hypermemetic/plexus-mono")
-                                            }),
-                                    )
-                                    .spawn();
+                                            }
+                                            None
+                                        })
+                                        .unwrap_or_else(|| {
+                                            dirs::home_dir()
+                                                .unwrap_or_default()
+                                                .join("dev/controlflow/hypermemetic/mono-provider")
+                                        });
+                                    let _ = std::process::Command::new("cargo")
+                                        .args(["run", "--release"])
+                                        .current_dir(mono_provider_dir)
+                                        .spawn();
+                                }
                                 // Notify frontend to reconnect
                                 let _ = handle.emit("mono-tray://show", ());
                             });

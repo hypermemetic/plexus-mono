@@ -4,7 +4,10 @@
   "private": true,
   "scripts": {
     "dev": "bun run build -- --watch",
-    "build": "mkdir -p dist && bun build src/app.ts --outdir dist --minify && cp src/index.html src/style.css dist/",
+    "build": "bun run check && mkdir -p dist && bun build src/app.ts --outdir dist --minify && cp src/index.html src/style.css dist/",
+    "check": "npx tsc --build --force",
+    "fmt": "npx prettier --write 'src/**/*.ts'",
+    "fmt:check": "npx prettier --check 'src/**/*.ts'",
     "tauri": "cargo tauri"
   },
   "dependencies": {
@@ -14,6 +17,8 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",
-    "serve": "^14.2.6"
+    "prettier": "^3.8.1",
+    "serve": "^14.2.6",
+    "typescript": "^5.9.3"
   }
 }

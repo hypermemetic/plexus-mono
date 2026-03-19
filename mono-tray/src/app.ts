@@ -2,7 +2,19 @@ import { PlexusRpcClient } from '../generated/transport';
 import { createPlayerClient } from '../generated/player/client';
 import { createPlayerPlaylistClient } from '../generated/player/playlist/client';
 import { createMonochromeClient } from '../generated/monochrome/client';
-import type { MonoEvent, MonoEventNowPlaying, MonoEventCover, MonoEventPlaylistInfo, MonoEventSearchTrack, MonoEventSearchAlbum, MonoEventSearchArtist, MonoEventAlbum, MonoEventAlbumTrack, MonoEventArtist, MonoEventQueue, QueuedTrack } from '../generated/player/types';
+import type {
+  MonoEvent,
+  MonoEventNowPlaying,
+  MonoEventCover,
+  MonoEventPlaylistInfo,
+  MonoEventSearchTrack,
+  MonoEventSearchAlbum,
+  MonoEventSearchArtist,
+  MonoEventAlbum,
+  MonoEventAlbumTrack,
+  MonoEventQueue,
+  QueuedTrack,
+} from '../generated/player/types';
 import { createClaudecodeClient } from '../generated/substrate/claudecode/client';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 
@@ -18,11 +30,11 @@ type ViewName = 'now-playing' | 'browse' | 'detail' | 'queue' | 'research' | 'hi
 
 const VIEW_HEIGHTS: Record<ViewName, number> = {
   'now-playing': 582,
-  'browse': 600,
-  'detail': 600,
-  'queue': 600,
-  'research': 650,
-  'history': 600,
+  browse: 600,
+  detail: 600,
+  queue: 600,
+  research: 650,
+  history: 600,
 };
 
 listen('mono-tray://show', () => {
@@ -64,7 +76,6 @@ const volumeSlider = document.getElementById('volume-slider') as HTMLInputElemen
 const queueBtn = document.getElementById('queue-btn')!;
 const queueInfo = document.getElementById('queue-info')!;
 const openLink = document.getElementById('open-link') as HTMLAnchorElement;
-const disconnectOverlay = document.getElementById('disconnect-overlay')!;
 const connDot = document.getElementById('conn-dot')!;
 
 // Nav elements
@@ -98,7 +109,6 @@ let currentDetailAlbumId: number | null = null;
 let searchDebounce: ReturnType<typeof setTimeout> | null = null;
 let activeSearchGen: AsyncGenerator | null = null;
 let browseScrollTop = 0;
-let lastQueueLength = 0;
 
 // --- Client-side position interpolation (survives disconnects) ---
 let interpPositionSecs = 0;
@@ -159,7 +169,6 @@ const peakBuffer = new Float32Array(PEAK_BUFFER_SIZE);
 let peakWriteIndex = 0;
 let peakBufferFilled = 0;
 let silenceSince: number | null = null;
-let waveformAnimId = 0;
 let lastWaveformTrackId: number | null = null;
 
 // --- Audio failover state ---
@@ -196,11 +205,11 @@ function bufferTrackAudio(trackId: number): void {
 
   const url = `http://127.0.0.1:${AUDIO_HTTP_PORT}/audio/${trackId}?quality=LOSSLESS`;
   fetch(url, { signal: audioFetchAbort.signal })
-    .then(resp => {
+    .then((resp) => {
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       return resp.blob();
     })
-    .then(blob => {
+    .then((blob) => {
       if (audioBufferTrackId !== trackId) return; // track changed during fetch
       audioFailoverBlobUrl = URL.createObjectURL(blob);
       audioFailoverEl.src = audioFailoverBlobUrl;
@@ -208,11 +217,10 @@ function bufferTrackAudio(trackId: number): void {
       const elapsed = (Date.now() - interpLastUpdate) / 1000;
       const pos = Math.min(interpPositionSecs + elapsed, currentDurationSecs);
       audioFailoverEl.currentTime = pos;
-      console.log(`Audio buffer ready for track ${trackId} (${(blob.size / 1024 / 1024).toFixed(1)}MB)`);
       // Prefetch next queued track
       prefetchNextTrack();
     })
-    .catch(err => {
+    .catch((err) => {
       if (err.name !== 'AbortError') {
         console.warn('Audio buffer fetch failed:', err);
       }
@@ -231,7 +239,10 @@ async function prefetchNextTrack(): Promise<void> {
         // Abort previous next-track fetch
         if (audioNextFetchAbort) audioNextFetchAbort.abort();
         audioNextFetchAbort = new AbortController();
-        if (audioNextBlobUrl) { URL.revokeObjectURL(audioNextBlobUrl); audioNextBlobUrl = null; }
+        if (audioNextBlobUrl) {
+          URL.revokeObjectURL(audioNextBlobUrl);
+          audioNextBlobUrl = null;
+        }
 
         audioNextTrackId = nextTrack.id;
         const url = `http://127.0.0.1:${AUDIO_HTTP_PORT}/audio/${nextTrack.id}?quality=LOSSLESS`;
@@ -241,10 +252,11 @@ async function prefetchNextTrack(): Promise<void> {
         if (audioNextTrackId !== nextTrack.id) return;
         audioNextBlobUrl = URL.createObjectURL(blob);
         audioNextEl.src = audioNextBlobUrl;
-        console.log(`Next track buffer ready for ${nextTrack.id} (${(blob.size / 1024 / 1024).toFixed(1)}MB)`);
       }
     }
-  } catch { /* best effort */ }
+  } catch {
+    /* best effort */
+  }
 }
 
 /** Activate client-side audio playback on disconnect */
@@ -256,9 +268,8 @@ function activateFailoverAudio(): void {
   audioFailoverEl.currentTime = pos;
   audioFailoverEl.muted = false;
   audioFailoverEl.volume = parseInt(volumeSlider.value) / 100;
-  audioFailoverEl.play().catch(err => console.warn('Failover play failed:', err));
+  audioFailoverEl.play().catch((err) => console.warn('Failover play failed:', err));
   audioFailoverActive = true;
-  console.log(`Audio failover activated at ${pos.toFixed(1)}s`);
 }
 
 /** Deactivate client audio and return the position for server sync */
@@ -267,7 +278,6 @@ function deactivateFailoverAudio(): number {
   audioFailoverEl.muted = true;
   audioFailoverEl.pause();
   audioFailoverActive = false;
-  console.log(`Audio failover deactivated at ${pos.toFixed(1)}s`);
   return pos;
 }
 
@@ -324,7 +334,13 @@ const claudecode = createClaudecodeClient(substrateRpc);
 
 // Fire-and-forget RPC helper
 async function rpcFire(gen: AsyncGenerator): Promise<void> {
-  try { for await (const _ of gen) { break; } } catch { /* ignore */ }
+  try {
+    for await (const _ of gen) {
+      break;
+    }
+  } catch {
+    /* ignore */
+  }
 }
 
 // --- Helpers ---
@@ -354,7 +370,9 @@ async function getCoverUrl(trackId: number): Promise<string | null> {
           return url;
         }
       }
-    } catch { /* no cover */ }
+    } catch {
+      /* no cover */
+    }
     return null;
   })();
 
@@ -375,8 +393,10 @@ async function fetchCoverArt(trackId: number): Promise<void> {
 }
 
 const DOWNLOAD_DIR = '~/Music/mono-tray';
-const downloadIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>';
-const checkIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>';
+const downloadIcon =
+  '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>';
+const checkIcon =
+  '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>';
 
 function makeDownloadBtn(trackId: number): HTMLButtonElement {
   const btn = document.createElement('button');
@@ -386,7 +406,8 @@ function makeDownloadBtn(trackId: number): HTMLButtonElement {
   btn.addEventListener('click', async (e) => {
     e.stopPropagation();
     btn.classList.add('downloading');
-    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" class="spin"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="31.4 31.4" stroke-linecap="round"/></svg>';
+    btn.innerHTML =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" class="spin"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="31.4 31.4" stroke-linecap="round"/></svg>';
     try {
       for await (const event of mono.download(trackId, DOWNLOAD_DIR)) {
         if (event.type === 'download_progress') {
@@ -414,35 +435,8 @@ function makeDownloadBtn(trackId: number): HTMLButtonElement {
   return btn;
 }
 
-const placeholderSvg = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
-
-/** Create a lazy-loading cover art thumbnail (uses track ID) */
-function makeCoverThumb(trackId: number): HTMLDivElement {
-  const wrap = document.createElement('div');
-  wrap.className = 'cover-thumb loading';
-  const img = document.createElement('img');
-  img.alt = '';
-  const placeholder = document.createElement('div');
-  placeholder.className = 'cover-thumb-placeholder';
-  placeholder.innerHTML = placeholderSvg;
-  wrap.appendChild(placeholder);
-  wrap.appendChild(img);
-  // Lazy load cover
-  getCoverUrl(trackId).then(url => {
-    if (url) {
-      img.src = url;
-      img.onload = () => {
-        img.classList.add('loaded');
-        wrap.classList.remove('loading');
-        wrap.classList.add('has-cover');
-      };
-    } else {
-      wrap.classList.remove('loading');
-      wrap.classList.add('failed');
-    }
-  });
-  return wrap;
-}
+const placeholderSvg =
+  '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
 
 /** Create a cover thumb for an album (loads album to get first track ID) */
 function makeAlbumCoverThumb(coverId?: string | null): HTMLDivElement {
@@ -487,13 +481,13 @@ function makeArtistLink(name: string): HTMLSpanElement {
   return span;
 }
 
-function makeAlbumLink(albumName: string, trackId?: number): HTMLSpanElement {
+function makeAlbumLink(albumName: string, trackId?: number | null): HTMLSpanElement {
   const span = document.createElement('span');
   span.className = 'clickable-meta';
   span.textContent = albumName;
   span.addEventListener('click', (e) => {
     e.stopPropagation();
-    navigateToAlbum(albumName, trackId);
+    navigateToAlbum(albumName, trackId ?? undefined);
   });
   return span;
 }
@@ -513,7 +507,9 @@ async function navigateToAlbum(albumName: string, trackId?: number): Promise<voi
           return;
         }
       }
-    } catch { /* fall through to search */ }
+    } catch {
+      /* fall through to search */
+    }
   }
 
   // Fallback: search by album name
@@ -537,7 +533,10 @@ async function navigateToAlbum(albumName: string, trackId?: number): Promise<voi
 }
 
 /** Build a subtitle element with clickable artist/album spans */
-function makeTrackSub(artist: string, opts?: { album?: string; durationSecs?: number; trackId?: number }): HTMLDivElement {
+function makeTrackSub(
+  artist: string,
+  opts?: { album?: string; durationSecs?: number; trackId?: number },
+): HTMLDivElement {
   const sub = document.createElement('div');
   sub.className = 'list-row-sub';
 
@@ -597,7 +596,6 @@ function updateUI(np: MonoEventNowPlaying): void {
     volumeSlider.value = String(Math.round(np.volume * 100));
   }
 
-  lastQueueLength = np.queueLength;
   if (np.queueLength > 0) {
     queueInfo.textContent = `${np.queueLength} in queue`;
   } else {
@@ -606,7 +604,7 @@ function updateUI(np: MonoEventNowPlaying): void {
 
   if (np.trackId) {
     openLink.style.display = '';
-    openLink.dataset.url = `https://monochrome.tf/track/t/${np.trackId}`;
+    openLink.dataset['url'] = `https://monochrome.tf/track/t/${np.trackId}`;
   } else {
     openLink.style.display = 'none';
   }
@@ -639,7 +637,6 @@ function updateUI(np: MonoEventNowPlaying): void {
       audioBufferTrackId = np.trackId;
       audioNextBlobUrl = null;
       audioNextTrackId = null;
-      console.log(`Promoted next-track buffer for ${np.trackId}`);
       prefetchNextTrack();
     } else {
       bufferTrackAudio(np.trackId);
@@ -662,7 +659,7 @@ function updateUI(np: MonoEventNowPlaying): void {
 // --- Waveform drawing ---
 // Smooth freeform shape from rolling peak buffer, floating above progress bar.
 function drawWaveform(): void {
-  waveformAnimId = requestAnimationFrame(drawWaveform);
+  requestAnimationFrame(drawWaveform);
 
   const w = waveformCanvas.width;
   const h = waveformCanvas.height;
@@ -683,7 +680,7 @@ function drawWaveform(): void {
     return;
   }
 
-  const silenceWarning = silenceSince !== null && (Date.now() - silenceSince) > 5000;
+  const silenceWarning = silenceSince !== null && Date.now() - silenceSince > 5000;
   const count = Math.min(peakBufferFilled, PEAK_BUFFER_SIZE);
   const step = w / (PEAK_BUFFER_SIZE - 1);
   const accentColor = silenceWarning ? 'rgba(231, 76, 60, 0.7)' : 'rgba(29, 185, 84, 0.6)';
@@ -692,25 +689,30 @@ function drawWaveform(): void {
   const points: { x: number; y: number }[] = [];
   for (let i = 0; i < count; i++) {
     const bufIdx = (peakWriteIndex - count + i + PEAK_BUFFER_SIZE) % PEAK_BUFFER_SIZE;
-    const peak = peakBuffer[bufIdx];
+    const peak = peakBuffer[bufIdx] ?? 0;
     const x = (PEAK_BUFFER_SIZE - count + i) * step;
     const y = h - Math.max(1, peak * h * 0.85);
     points.push({ x, y });
   }
 
+  if (points.length < 2) return;
+  const first = points[0]!;
+  const last = points[points.length - 1]!;
+
   // Draw filled smooth curve using quadratic bezier through midpoints
   waveCtx.beginPath();
-  waveCtx.moveTo(points[0].x, h); // start at bottom-left
-  waveCtx.lineTo(points[0].x, points[0].y);
+  waveCtx.moveTo(first.x, h); // start at bottom-left
+  waveCtx.lineTo(first.x, first.y);
 
   for (let i = 0; i < points.length - 1; i++) {
-    const mx = (points[i].x + points[i + 1].x) / 2;
-    const my = (points[i].y + points[i + 1].y) / 2;
-    waveCtx.quadraticCurveTo(points[i].x, points[i].y, mx, my);
+    const p = points[i]!;
+    const pNext = points[i + 1]!;
+    const mx = (p.x + pNext.x) / 2;
+    const my = (p.y + pNext.y) / 2;
+    waveCtx.quadraticCurveTo(p.x, p.y, mx, my);
   }
 
   // Final point
-  const last = points[points.length - 1];
   waveCtx.lineTo(last.x, last.y);
   waveCtx.lineTo(last.x, h); // down to bottom-right
   waveCtx.closePath();
@@ -724,11 +726,13 @@ function drawWaveform(): void {
 
   // Stroke the top edge for definition
   waveCtx.beginPath();
-  waveCtx.moveTo(points[0].x, points[0].y);
+  waveCtx.moveTo(first.x, first.y);
   for (let i = 0; i < points.length - 1; i++) {
-    const mx = (points[i].x + points[i + 1].x) / 2;
-    const my = (points[i].y + points[i + 1].y) / 2;
-    waveCtx.quadraticCurveTo(points[i].x, points[i].y, mx, my);
+    const p = points[i]!;
+    const pNext = points[i + 1]!;
+    const mx = (p.x + pNext.x) / 2;
+    const my = (p.y + pNext.y) / 2;
+    waveCtx.quadraticCurveTo(p.x, p.y, mx, my);
   }
   waveCtx.lineTo(last.x, last.y);
   waveCtx.strokeStyle = silenceWarning ? '#e74c3c' : '#1db954';
@@ -800,7 +804,7 @@ function updateBreadcrumbs(view: ViewName): void {
 function navigateTo(view: ViewName): void {
   // Save browse scroll before leaving
   if (currentView === 'browse' && view !== 'browse') {
-    browseScrollTop = browseList.scrollTop;
+    browseScrollTop = document.getElementById('view-browse')!.scrollTop;
   }
 
   // Clear search when leaving browse
@@ -813,7 +817,7 @@ function navigateTo(view: ViewName): void {
   }
 
   currentView = view;
-  viewContainer.dataset.view = view;
+  viewContainer.dataset['view'] = view;
 
   // Resize window to fit view
   appWindow.setSize(new LogicalSize(352, VIEW_HEIGHTS[view]));
@@ -839,7 +843,9 @@ function navigateTo(view: ViewName): void {
       iconPlayAll.classList.add('hidden');
       iconClear.classList.add('hidden');
       navAction.classList.add('hidden');
-      requestAnimationFrame(() => { browseList.scrollTop = browseScrollTop; });
+      requestAnimationFrame(() => {
+        document.getElementById('view-browse')!.scrollTop = browseScrollTop;
+      });
       break;
     case 'detail':
       navBack.classList.remove('hidden');
@@ -878,6 +884,29 @@ function navigateTo(view: ViewName): void {
   }
 }
 
+// --- Playlist sorting ---
+type PlaylistSortKey = 'name' | 'tracks' | 'newest' | 'updated';
+let playlistSortKey: PlaylistSortKey = 'updated';
+
+function sortPlaylists(playlists: MonoEventPlaylistInfo[], key: PlaylistSortKey): MonoEventPlaylistInfo[] {
+  const sorted = [...playlists];
+  switch (key) {
+    case 'name':
+      sorted.sort((a, b) => a.name.localeCompare(b.name));
+      break;
+    case 'tracks':
+      sorted.sort((a, b) => b.trackCount - a.trackCount);
+      break;
+    case 'newest':
+      sorted.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      break;
+    case 'updated':
+      sorted.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+      break;
+  }
+  return sorted;
+}
+
 // --- Playlist loading ---
 async function loadPlaylists(): Promise<void> {
   if (cachedPlaylists) {
@@ -912,9 +941,8 @@ function renderPlaylistList(playlists: MonoEventPlaylistInfo[]): void {
   browseList.innerHTML = '';
 
   // Render Liked playlist at top if present (real backend file)
-  const likedIdx = playlists.findIndex(pl => pl.name === 'Liked');
-  if (likedIdx >= 0) {
-    const likedPl = playlists[likedIdx];
+  const likedPl = playlists.find((pl) => pl.name === 'Liked');
+  if (likedPl) {
     const likedRow = document.createElement('div');
     likedRow.className = 'liked-songs-row';
     likedRow.innerHTML = `
@@ -937,7 +965,8 @@ function renderPlaylistList(playlists: MonoEventPlaylistInfo[]): void {
   // New Playlist button at top
   const newRow = document.createElement('div');
   newRow.className = 'new-playlist-row';
-  newRow.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg> New Playlist';
+  newRow.innerHTML =
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg> New Playlist';
   newRow.addEventListener('click', promptCreatePlaylist);
   browseList.appendChild(newRow);
 
@@ -948,8 +977,33 @@ function renderPlaylistList(playlists: MonoEventPlaylistInfo[]): void {
     browseList.appendChild(emptyEl);
     return;
   }
-  for (const pl of playlists) {
-    if (pl.name === 'Liked') continue; // rendered above with special styling
+
+  // Sort bar
+  const sortBar = document.createElement('div');
+  sortBar.className = 'sort-bar';
+  const sortOptions: { key: PlaylistSortKey; label: string }[] = [
+    { key: 'updated', label: 'Recent' },
+    { key: 'newest', label: 'Newest' },
+    { key: 'name', label: 'Name' },
+    { key: 'tracks', label: 'Tracks' },
+  ];
+  for (const opt of sortOptions) {
+    const btn = document.createElement('button');
+    btn.className = 'sort-btn' + (playlistSortKey === opt.key ? ' active' : '');
+    btn.textContent = opt.label;
+    btn.addEventListener('click', () => {
+      playlistSortKey = opt.key;
+      renderPlaylistList(playlists);
+    });
+    sortBar.appendChild(btn);
+  }
+  browseList.appendChild(sortBar);
+
+  const sorted = sortPlaylists(
+    playlists.filter((pl) => pl.name !== 'Liked'),
+    playlistSortKey,
+  );
+  for (const pl of sorted) {
     browseList.appendChild(makePlaylistRow(pl));
   }
 }
@@ -959,8 +1013,8 @@ const searchTabs = document.getElementById('search-tabs')!;
 
 function setSearchKind(kind: 'tracks' | 'albums' | 'artists'): void {
   searchKind = kind;
-  searchTabs.querySelectorAll('.search-tab').forEach(tab => {
-    tab.classList.toggle('active', (tab as HTMLElement).dataset.kind === kind);
+  searchTabs.querySelectorAll('.search-tab').forEach((tab) => {
+    tab.classList.toggle('active', (tab as HTMLElement).dataset['kind'] === kind);
   });
   searchInput.placeholder = `Search ${kind}...`;
   if (searchInput.value.trim()) performSearch(searchInput.value);
@@ -968,7 +1022,7 @@ function setSearchKind(kind: 'tracks' | 'albums' | 'artists'): void {
 
 searchTabs.addEventListener('click', (e) => {
   const tab = (e.target as HTMLElement).closest('.search-tab') as HTMLElement | null;
-  if (tab?.dataset.kind) setSearchKind(tab.dataset.kind as any);
+  if (tab?.dataset['kind']) setSearchKind(tab.dataset['kind'] as 'tracks' | 'albums' | 'artists');
 });
 
 function performSearch(query: string): void {
@@ -990,9 +1044,7 @@ function performSearch(query: string): void {
   searchTabs.classList.remove('hidden');
 
   const q = query.toLowerCase();
-  const matchingPlaylists = (cachedPlaylists || []).filter(
-    pl => pl.name.toLowerCase().includes(q)
-  );
+  const matchingPlaylists = (cachedPlaylists || []).filter((pl) => pl.name.toLowerCase().includes(q));
 
   const gen = mono.search(query, searchKind, 12);
   activeSearchGen = gen;
@@ -1065,19 +1117,21 @@ function makePlaylistRow(pl: MonoEventPlaylistInfo): HTMLElement {
   const deleteBtn = document.createElement('button');
   deleteBtn.className = 'row-action';
   deleteBtn.title = 'Delete playlist';
-  deleteBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>';
+  deleteBtn.innerHTML =
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>';
   deleteBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     if (confirm(`Delete playlist "${pl.name}"?`)) {
       rpcFire(playlist.delete(pl.name));
-      cachedPlaylists = cachedPlaylists?.filter(p => p.name !== pl.name) || null;
+      cachedPlaylists = cachedPlaylists?.filter((p) => p.name !== pl.name) || null;
       if (cachedPlaylists) renderPlaylistList(cachedPlaylists);
     }
   });
 
   const chevron = document.createElement('span');
   chevron.className = 'list-row-chevron';
-  chevron.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>';
+  chevron.innerHTML =
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>';
 
   row.appendChild(info);
   row.appendChild(deleteBtn);
@@ -1122,7 +1176,8 @@ function renderSearchResults(results: MonoEventSearchTrack[], hasPlaylistSection
     const playBtn = document.createElement('button');
     playBtn.className = 'row-action';
     playBtn.title = 'Play';
-    playBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
+    playBtn.innerHTML =
+      '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
     playBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       rpcFire(player.play(track.id));
@@ -1133,7 +1188,8 @@ function renderSearchResults(results: MonoEventSearchTrack[], hasPlaylistSection
     const addBtn = document.createElement('button');
     addBtn.className = 'row-action';
     addBtn.title = 'Add to queue';
-    addBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>';
+    addBtn.innerHTML =
+      '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>';
     addBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       rpcFire(player.queueAdd(track.id));
@@ -1143,7 +1199,8 @@ function renderSearchResults(results: MonoEventSearchTrack[], hasPlaylistSection
     const nextBtn = document.createElement('button');
     nextBtn.className = 'row-action';
     nextBtn.title = 'Play next';
-    nextBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>';
+    nextBtn.innerHTML =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>';
     nextBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       rpcFire(player.queueAddNext(track.id));
@@ -1153,7 +1210,8 @@ function renderSearchResults(results: MonoEventSearchTrack[], hasPlaylistSection
     const plBtn = document.createElement('button');
     plBtn.className = 'row-action';
     plBtn.title = 'Add to playlist';
-    plBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M14 10H2v2h12v-2zm0-4H2v2h12V6zm4 8v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zM2 16h8v-2H2v2z"/></svg>';
+    plBtn.innerHTML =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M14 10H2v2h12v-2zm0-4H2v2h12V6zm4 8v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zM2 16h8v-2H2v2z"/></svg>';
     plBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       showPlaylistPicker(track.id);
@@ -1205,7 +1263,8 @@ function renderAlbumResults(results: MonoEventSearchAlbum[]): void {
 
     const chevron = document.createElement('span');
     chevron.className = 'list-row-chevron';
-    chevron.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>';
+    chevron.innerHTML =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>';
 
     row.appendChild(makeAlbumCoverThumb((album as any).coverId));
     row.appendChild(info);
@@ -1243,7 +1302,8 @@ function renderArtistResults(results: MonoEventSearchArtist[]): void {
 
     const chevron = document.createElement('span');
     chevron.className = 'list-row-chevron';
-    chevron.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>';
+    chevron.innerHTML =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>';
 
     row.appendChild(info);
     row.appendChild(chevron);
@@ -1269,8 +1329,9 @@ async function loadAlbumDetail(albumId: number): Promise<void> {
     }
 
     // Load cover art from first track (mono.cover needs track IDs, not album IDs)
-    if (tracks.length > 0) {
-      getCoverUrl(tracks[0].id).then(url => {
+    const firstTrack = tracks[0];
+    if (firstTrack) {
+      getCoverUrl(firstTrack.id).then((url) => {
         if (url) {
           detailCoverImg.src = url;
           detailCoverImg.onload = () => {
@@ -1312,11 +1373,15 @@ async function loadAlbumDetail(albumId: number): Promise<void> {
             for await (const ev of mono.download(t.id, DOWNLOAD_DIR)) {
               if (ev.type === 'download_complete') break;
             }
-          } catch { /* continue with next track */ }
+          } catch {
+            /* continue with next track */
+          }
         }
         dlAllBtn.innerHTML = checkIcon + ' Downloaded';
         dlAllBtn.classList.remove('downloading');
-        setTimeout(() => { dlAllBtn.innerHTML = downloadIcon + ' Download Album'; }, 3000);
+        setTimeout(() => {
+          dlAllBtn.innerHTML = downloadIcon + ' Download Album';
+        }, 3000);
       });
       detailTracks.appendChild(dlAllBtn);
     }
@@ -1325,10 +1390,15 @@ async function loadAlbumDetail(albumId: number): Promise<void> {
     if (tracks.length > 1) {
       const shuffleBtn = document.createElement('button');
       shuffleBtn.className = 'save-queue-btn';
-      shuffleBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg> Shuffle';
+      shuffleBtn.innerHTML =
+        '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg> Shuffle';
       shuffleBtn.addEventListener('click', async () => {
         shuffleBtn.textContent = 'Shuffling...';
-        try { for await (const _ of player.shuffleStart([currentDetailAlbumId!])) { break; } } catch {}
+        try {
+          for await (const _ of player.shuffleStart([currentDetailAlbumId!])) {
+            break;
+          }
+        } catch {}
         navigateTo('now-playing');
       });
       detailTracks.appendChild(shuffleBtn);
@@ -1358,7 +1428,8 @@ async function loadAlbumDetail(albumId: number): Promise<void> {
       const queueBtn = document.createElement('button');
       queueBtn.className = 'row-action';
       queueBtn.title = 'Add to queue';
-      queueBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>';
+      queueBtn.innerHTML =
+        '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>';
       queueBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         rpcFire(player.queueAdd(track.id));
@@ -1368,7 +1439,8 @@ async function loadAlbumDetail(albumId: number): Promise<void> {
       const nextBtn = document.createElement('button');
       nextBtn.className = 'row-action';
       nextBtn.title = 'Play next';
-      nextBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>';
+      nextBtn.innerHTML =
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>';
       nextBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         rpcFire(player.queueAddNext(track.id));
@@ -1391,7 +1463,7 @@ async function loadAlbumDetail(albumId: number): Promise<void> {
 }
 
 // --- Artist albums (reuses detail view) ---
-async function loadArtistAlbums(artistId: number, artistName: string): Promise<void> {
+async function loadArtistAlbums(_artistId: number, artistName: string): Promise<void> {
   currentDetailAlbumId = null;
   detailTracks.innerHTML = '';
   detailSubheader.textContent = 'Loading...';
@@ -1448,7 +1520,8 @@ async function loadArtistAlbums(artistId: number, artistName: string): Promise<v
 
       const chevron = document.createElement('span');
       chevron.className = 'list-row-chevron';
-      chevron.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>';
+      chevron.innerHTML =
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>';
 
       row.appendChild(makeAlbumCoverThumb((album as any).coverId));
       row.appendChild(info);
@@ -1493,17 +1566,22 @@ async function loadPlaylistDetail(name: string): Promise<void> {
     if (tracks.length > 1) {
       const shuffleBtn = document.createElement('button');
       shuffleBtn.className = 'save-queue-btn';
-      shuffleBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg> Shuffle';
+      shuffleBtn.innerHTML =
+        '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg> Shuffle';
       shuffleBtn.addEventListener('click', async () => {
         shuffleBtn.textContent = 'Shuffling...';
-        try { for await (const _ of player.shuffleStart(undefined, [name])) { break; } } catch {}
+        try {
+          for await (const _ of player.shuffleStart(undefined, [name])) {
+            break;
+          }
+        } catch {}
         navigateTo('now-playing');
       });
       detailTracks.appendChild(shuffleBtn);
     }
 
     for (let i = 0; i < tracks.length; i++) {
-      const track = tracks[i];
+      const track = tracks[i]!;
       const row = document.createElement('div');
       row.className = 'list-row';
       row.addEventListener('click', () => {
@@ -1518,13 +1596,18 @@ async function loadPlaylistDetail(name: string): Promise<void> {
       titleSpan.className = 'list-row-title';
       titleSpan.textContent = track.title;
 
-      const sub = makeTrackSub(track.artist, { album: track.album, durationSecs: track.durationSecs, trackId: track.id });
+      const sub = makeTrackSub(track.artist, {
+        album: track.album,
+        durationSecs: track.durationSecs,
+        trackId: track.id,
+      });
 
       // Remove from playlist button
       const removeBtn = document.createElement('button');
       removeBtn.className = 'row-action';
       removeBtn.title = 'Remove from playlist';
-      removeBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>';
+      removeBtn.innerHTML =
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>';
       const trackIndex = i;
       removeBtn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -1548,78 +1631,6 @@ async function loadPlaylistDetail(name: string): Promise<void> {
     const errEl = document.createElement('div');
     errEl.className = 'list-empty';
     errEl.textContent = 'Failed to load playlist';
-    detailTracks.appendChild(errEl);
-  }
-}
-
-// --- Liked Songs detail ---
-async function loadLikedSongsDetail(): Promise<void> {
-  currentDetailAlbumId = null;
-  detailTracks.innerHTML = '';
-  detailSubheader.textContent = 'Loading...';
-  detailCover.classList.remove('loaded');
-  detailCover.style.display = 'none';
-
-  try {
-    let ids: number[] = [];
-    for await (const event of player.likedTracks()) {
-      if (event.type === 'queue') {
-        ids = (event as MonoEventQueue).tracks.map(t => t.id);
-      }
-    }
-    if (ids.length === 0) {
-      detailSubheader.textContent = 'No liked songs';
-      return;
-    }
-    detailSubheader.textContent = `${ids.length} track${ids.length !== 1 ? 's' : ''}`;
-
-    // Resolve track metadata via search (best effort)
-    for (const id of ids) {
-      try {
-        let trackEvent: any = null;
-        for await (const event of mono.track(id)) {
-          if (event.type === 'track') { trackEvent = event; break; }
-        }
-        if (!trackEvent) continue;
-        const row = document.createElement('div');
-        row.className = 'list-row';
-        row.addEventListener('click', () => {
-          rpcFire(player.play(id));
-          navigateTo('now-playing');
-        });
-        const info = document.createElement('div');
-        info.className = 'list-row-info';
-        const titleSpan = document.createElement('div');
-        titleSpan.className = 'list-row-title';
-        titleSpan.textContent = trackEvent.title;
-        const sub = makeTrackSub(trackEvent.artist, { album: trackEvent.album, durationSecs: trackEvent.durationSecs, trackId: id });
-        info.appendChild(titleSpan);
-        info.appendChild(sub);
-
-        // Unlike button
-        const unlikeBtn = document.createElement('button');
-        unlikeBtn.className = 'row-action';
-        unlikeBtn.title = 'Unlike';
-        unlikeBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="#e74c3c"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>';
-        unlikeBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          rpcFire(player.like(id, 'liked-songs'));
-          likedSet.delete(id);
-          row.remove();
-        });
-
-        row.appendChild(info);
-        row.appendChild(makeDownloadBtn(id));
-        row.appendChild(unlikeBtn);
-        detailTracks.appendChild(row);
-      } catch { /* skip this track */ }
-    }
-  } catch {
-    detailSubheader.textContent = '';
-    detailTracks.innerHTML = '';
-    const errEl = document.createElement('div');
-    errEl.className = 'list-empty';
-    errEl.textContent = 'Failed to load liked songs';
     detailTracks.appendChild(errEl);
   }
 }
@@ -1659,7 +1670,8 @@ async function loadQueue(): Promise<void> {
 
     const saveBtn = document.createElement('button');
     saveBtn.className = 'save-queue-btn';
-    saveBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M17 3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V7l-4-4zm-5 16c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zm3-10H5V5h10v4z"/></svg> Save as Playlist';
+    saveBtn.innerHTML =
+      '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M17 3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V7l-4-4zm-5 16c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zm3-10H5V5h10v4z"/></svg> Save as Playlist';
     saveBtn.addEventListener('click', () => {
       const name = prompt('Playlist name:');
       if (name?.trim()) {
@@ -1673,7 +1685,8 @@ async function loadQueue(): Promise<void> {
 
     const clearBtn = document.createElement('button');
     clearBtn.className = 'save-queue-btn clear-queue-btn';
-    clearBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg> Clear';
+    clearBtn.innerHTML =
+      '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg> Clear';
     clearBtn.addEventListener('click', () => {
       rpcFire(player.queueClear());
       queueTracksEl.innerHTML = '';
@@ -1689,7 +1702,7 @@ async function loadQueue(): Promise<void> {
     queueTracksEl.appendChild(btnRow);
 
     for (let i = 0; i < tracks.length; i++) {
-      const track = tracks[i];
+      const track = tracks[i]!;
       const row = document.createElement('div');
       row.className = 'list-row';
       if (i === currentIndex) row.classList.add('active');
@@ -1706,7 +1719,11 @@ async function loadQueue(): Promise<void> {
       titleSpan.className = 'list-row-title';
       titleSpan.textContent = track.title;
 
-      const sub = makeTrackSub(track.artist, { album: track.album, durationSecs: track.durationSecs, trackId: track.id });
+      const sub = makeTrackSub(track.artist, {
+        album: track.album,
+        durationSecs: track.durationSecs,
+        trackId: track.id,
+      });
       if (track.source) {
         const fromSpan = document.createElement('span');
         fromSpan.className = 'queue-source';
@@ -1787,20 +1804,32 @@ btnPlayPause.addEventListener('click', async () => {
   }
   try {
     const gen = isPlaying ? player.pause() : player.resume();
-    for await (const _ of gen) { break; }
-  } catch { /* ignore */ }
+    for await (const _ of gen) {
+      break;
+    }
+  } catch {
+    /* ignore */
+  }
 });
 
 btnPrevious.addEventListener('click', async () => {
   try {
-    for await (const _ of player.previous()) { break; }
-  } catch { /* ignore */ }
+    for await (const _ of player.previous()) {
+      break;
+    }
+  } catch {
+    /* ignore */
+  }
 });
 
 btnNext.addEventListener('click', async () => {
   try {
-    for await (const _ of player.next()) { break; }
-  } catch { /* ignore */ }
+    for await (const _ of player.next()) {
+      break;
+    }
+  } catch {
+    /* ignore */
+  }
 });
 
 // Volume control with debounce
@@ -1813,8 +1842,12 @@ volumeSlider.addEventListener('input', () => {
   volumeDebounce = setTimeout(async () => {
     const level = parseInt(volumeSlider.value) / 100;
     try {
-      for await (const _ of player.volume(level)) { break; }
-    } catch { /* ignore */ }
+      for await (const _ of player.volume(level)) {
+        break;
+      }
+    } catch {
+      /* ignore */
+    }
   }, 50);
 });
 
@@ -1856,7 +1889,7 @@ progressBar.addEventListener('pointerup', (e) => {
 // Open on Monochrome
 openLink.addEventListener('click', async (e) => {
   e.preventDefault();
-  const url = openLink.dataset.url;
+  const url = openLink.dataset['url'];
   if (url && (window as any).__TAURI__) {
     const { open } = await import('@tauri-apps/plugin-shell');
     await open(url);
@@ -1951,14 +1984,20 @@ async function ensureClaudeSession(): Promise<void> {
   if (claudeSessionReady) return;
   await substrateRpc.connect();
   try {
-    await claudecode.create('sonnet', RESEARCH_SESSION, '/tmp', false,
+    await claudecode.create(
+      'sonnet',
+      RESEARCH_SESSION,
+      '/tmp',
+      false,
+      null,
       `You are a music researcher and playlist curator. You have access to WebSearch to research music themes, genres, artists, and tracks.
 
 When asked to research a theme, use WebSearch to find artists, albums, and tracks that match. Then return a JSON object with search terms for finding those in a music catalog.
 
 When asked to curate from found tracks, pick the best ones, order them for the intended thematic arc, and explain each choice.
 
-You MUST respond with ONLY valid JSON — no markdown fences, no explanation text, no preamble.`);
+You MUST respond with ONLY valid JSON — no markdown fences, no explanation text, no preamble.`,
+    );
     claudeSessionReady = true;
   } catch {
     // Session already exists — that's fine
@@ -2003,9 +2042,13 @@ function parseSearchSuggestions(text: string): string[] | null {
   }
 }
 
-async function askClaude(prompt: string, allowedTools?: string[], onToolUse?: (toolName: string) => void): Promise<string> {
+async function askClaude(
+  prompt: string,
+  allowedTools?: string[],
+  onToolUse?: (toolName: string) => void,
+): Promise<string> {
   let fullResponse = '';
-  for await (const event of claudecode.chat(RESEARCH_SESSION, prompt, null, allowedTools)) {
+  for await (const event of claudecode.chat(RESEARCH_SESSION, prompt, allowedTools)) {
     if (event.type === 'content') {
       fullResponse += event.text;
     } else if (event.type === 'tool_use' && onToolUse) {
@@ -2050,9 +2093,7 @@ Return 10-20 specific, varied search terms. Mix artist names, album titles, and 
       const researchResponse = await askClaude(researchPrompt, ['WebSearch'], (toolName) => {
         if (toolName === 'WebSearch') {
           webSearchCount++;
-          setResearchStatus(webSearchCount === 1
-            ? 'Searching the web...'
-            : `Searching the web (${webSearchCount})...`);
+          setResearchStatus(webSearchCount === 1 ? 'Searching the web...' : `Searching the web (${webSearchCount})...`);
         }
       });
       searchSuggestions = parseSearchSuggestions(researchResponse);
@@ -2129,8 +2170,11 @@ Return 10-20 specific, varied search terms. Mix artist names, album titles, and 
     // ── Phase 3: Curate with Claude ──
     setResearchStatus(`Found ${allTracks.length} tracks, curating...`);
 
-    const trackList = allTracks.map(t => ({
-      id: t.id, title: t.title, artist: t.artist, album: t.album
+    const trackList = allTracks.map((t) => ({
+      id: t.id,
+      title: t.title,
+      artist: t.artist,
+      album: t.album,
     }));
 
     const curatePrompt = `Here are the tracks I found in our music library for the theme: "${query}"
@@ -2146,14 +2190,17 @@ ${JSON.stringify(trackList)}`;
     let result: { name: string; tracks: ResearchTrack[] } | null = null;
 
     for (let attempt = 1; attempt <= MAX_RESEARCH_ATTEMPTS; attempt++) {
-      setResearchStatus(attempt === 1
-        ? `Found ${allTracks.length} tracks, curating...`
-        : `Retrying (${attempt}/${MAX_RESEARCH_ATTEMPTS})...`);
+      setResearchStatus(
+        attempt === 1
+          ? `Found ${allTracks.length} tracks, curating...`
+          : `Retrying (${attempt}/${MAX_RESEARCH_ATTEMPTS})...`,
+      );
 
       try {
-        const prompt = attempt === 1
-          ? curatePrompt
-          : `Your previous response was not valid JSON. Please try again. Respond with ONLY a JSON object, nothing else:\n\n${curatePrompt}`;
+        const prompt =
+          attempt === 1
+            ? curatePrompt
+            : `Your previous response was not valid JSON. Please try again. Respond with ONLY a JSON object, nothing else:\n\n${curatePrompt}`;
 
         const response = await askClaude(prompt);
         result = parseResearchJson(response);
@@ -2174,10 +2221,8 @@ ${JSON.stringify(trackList)}`;
       researchResult = result;
 
       // Auto-save: create playlist with Claude's reasoning as description
-      const description = result.tracks
-        .map(t => `${t.title} — ${t.artist}: ${t.reason}`)
-        .join('\n');
-      const trackIds = result.tracks.map(t => t.id);
+      const description = result.tracks.map((t) => `${t.title} — ${t.artist}: ${t.reason}`).join('\n');
+      const trackIds = result.tracks.map((t) => t.id);
       setResearchStatus('Saving playlist...');
       await rpcFire(playlist.create(result.name, description, trackIds));
       cachedPlaylists = null; // invalidate cache so list refreshes
@@ -2186,11 +2231,11 @@ ${JSON.stringify(trackList)}`;
       const researchData = {
         query,
         searchSuggestions,
-        allFoundTracks: allTracks.map(t => ({ id: t.id, title: t.title, artist: t.artist, album: t.album })),
+        allFoundTracks: allTracks.map((t) => ({ id: t.id, title: t.title, artist: t.artist, album: t.album })),
         curatedTracks: result.tracks,
         createdAt: new Date().toISOString(),
       };
-      rpcFire(playlist.researchSave(result.name, researchData));
+      rpcFire(playlist.researchSave(researchData, result.name));
 
       setResearchStatus('');
       // Auto-show the research results view
@@ -2199,7 +2244,7 @@ ${JSON.stringify(trackList)}`;
       if (notificationsEnabled) {
         sendNotification({
           title: 'Playlist Research',
-          body: `Saved: ${result.name} (${result.tracks.length} tracks)`
+          body: `Saved: ${result.name} (${result.tracks.length} tracks)`,
         });
       }
     } else if (!researchResult) {
@@ -2247,7 +2292,8 @@ function showResearchResults(): void {
     const playBtn = document.createElement('button');
     playBtn.className = 'row-action';
     playBtn.title = 'Play';
-    playBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
+    playBtn.innerHTML =
+      '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
     playBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       rpcFire(player.play(track.id));
@@ -2257,7 +2303,8 @@ function showResearchResults(): void {
     const queueAddBtn = document.createElement('button');
     queueAddBtn.className = 'row-action';
     queueAddBtn.title = 'Add to queue';
-    queueAddBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>';
+    queueAddBtn.innerHTML =
+      '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>';
     queueAddBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       rpcFire(player.queueAdd(track.id, null, researchResult?.name));
@@ -2267,11 +2314,12 @@ function showResearchResults(): void {
     const removeBtn = document.createElement('button');
     removeBtn.className = 'row-action';
     removeBtn.title = 'Remove';
-    removeBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>';
+    removeBtn.innerHTML =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>';
     removeBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       if (researchResult) {
-        researchResult.tracks = researchResult.tracks.filter(t => t.id !== track.id);
+        researchResult.tracks = researchResult.tracks.filter((t) => t.id !== track.id);
         row.remove();
       }
     });
@@ -2419,9 +2467,7 @@ async function loadHistory(): Promise<void> {
     }
     // Reverse: most recent first
     tracks = tracks.slice().reverse();
-    historySubheader.textContent = tracks.length > 0
-      ? `${tracks.length} track${tracks.length !== 1 ? 's' : ''}`
-      : '';
+    historySubheader.textContent = tracks.length > 0 ? `${tracks.length} track${tracks.length !== 1 ? 's' : ''}` : '';
     historyTracksEl.innerHTML = '';
     if (tracks.length === 0) {
       const emptyEl = document.createElement('div');
@@ -2442,14 +2488,19 @@ async function loadHistory(): Promise<void> {
       const titleSpan = document.createElement('div');
       titleSpan.className = 'list-row-title';
       titleSpan.textContent = track.title;
-      const sub = makeTrackSub(track.artist, { album: track.album, durationSecs: track.durationSecs, trackId: track.id });
+      const sub = makeTrackSub(track.artist, {
+        album: track.album,
+        durationSecs: track.durationSecs,
+        trackId: track.id,
+      });
       info.appendChild(titleSpan);
       info.appendChild(sub);
       // Like indicator
       if (likedSet.has(track.id)) {
         const heart = document.createElement('span');
         heart.className = 'like-indicator';
-        heart.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="#e74c3c"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>';
+        heart.innerHTML =
+          '<svg width="10" height="10" viewBox="0 0 24 24" fill="#e74c3c"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>';
         row.appendChild(heart);
       }
       row.appendChild(info);
@@ -2475,7 +2526,9 @@ async function loadLikedSet(): Promise<void> {
         for (const t of q.tracks) likedSet.add(t.id);
       }
     }
-  } catch { /* not connected yet, will retry */ }
+  } catch {
+    /* not connected yet, will retry */
+  }
 }
 
 // --- Main loop: stream now_playing with reconnection ---
@@ -2491,14 +2544,26 @@ async function streamNowPlaying(): Promise<void> {
       if (audioFailoverActive) {
         const clientPos = deactivateFailoverAudio();
         (async () => {
-          try { for await (const _ of player.seek(clientPos)) { /* drain */ } } catch { /* best effort */ }
+          try {
+            for await (const _ of player.seek(clientPos)) {
+              /* drain */
+            }
+          } catch {
+            /* best effort */
+          }
         })();
       } else if (isPlaying && interpLastUpdate > 0 && currentDurationSecs > 0) {
         const elapsed = (Date.now() - interpLastUpdate) / 1000;
         const clientPos = Math.min(interpPositionSecs + elapsed, currentDurationSecs);
         // Fire-and-forget seek to sync server with client's position
         (async () => {
-          try { for await (const _ of player.seek(clientPos)) { /* drain */ } } catch { /* best effort */ }
+          try {
+            for await (const _ of player.seek(clientPos)) {
+              /* drain */
+            }
+          } catch {
+            /* best effort */
+          }
         })();
       }
 
@@ -2523,7 +2588,7 @@ async function streamNowPlaying(): Promise<void> {
     // Grace period: 6 × 500ms = 3s of rapid retries
     let reconnected = false;
     for (let i = 0; i < 6; i++) {
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 500));
       try {
         await rpc.connect();
         reconnected = true;
@@ -2535,7 +2600,7 @@ async function streamNowPlaying(): Promise<void> {
     if (reconnected) continue;
 
     // Slow retry
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, 2000));
   }
 }
 
@@ -2548,7 +2613,7 @@ async function streamAudioPeaks(): Promise<void> {
         const peaks = (event as any).peaks as number[];
         const start = Math.max(0, peaks.length - PEAK_BUFFER_SIZE);
         for (let i = start; i < peaks.length; i++) {
-          peakBuffer[peakWriteIndex] = peaks[i];
+          peakBuffer[peakWriteIndex] = peaks[i] ?? 0;
           peakWriteIndex = (peakWriteIndex + 1) % PEAK_BUFFER_SIZE;
           if (peakBufferFilled < PEAK_BUFFER_SIZE) peakBufferFilled++;
         }
@@ -2577,7 +2642,7 @@ async function streamAudioPeaks(): Promise<void> {
     } catch {
       // Stream ended or disconnected, retry after delay
     }
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, 2000));
   }
 }
 streamAudioPeaks();
@@ -2585,7 +2650,8 @@ streamAudioPeaks();
 // --- JS hover polyfill (CSS :hover doesn't fire in NSPanel WebView) ---
 // Native global mouseMoved monitor in Rust emits coordinates via Tauri events.
 // We use elementFromPoint to resolve the hovered element.
-const hoverSelectors = '.nav-btn, .control-btn, .list-row, .row-action, #queue-btn, #open-link, .crumb, #progress-bar, .action-btn, .new-playlist-row, .save-queue-btn, .search-tab, .clickable-meta, #like-btn, #np-download-btn, #history-btn, .liked-songs-row, #conn-dot';
+const hoverSelectors =
+  '.nav-btn, .control-btn, .list-row, .row-action, #queue-btn, #open-link, .crumb, #progress-bar, .action-btn, .new-playlist-row, .save-queue-btn, .search-tab, .clickable-meta, #like-btn, #np-download-btn, #history-btn, .liked-songs-row, #conn-dot';
 let currentHover: Element | null = null;
 
 listen<{ x: number; y: number }>('mono-tray://mousemove', (event) => {
@@ -2606,15 +2672,20 @@ listen('mono-tray://mouseleave', () => {
 
 // --- Click feedback: add .clicked class that lingers and fades out ---
 // Use 'click' event (not mousedown) since click events fire reliably in NSPanel
-const clickSelectors = '.nav-btn, .control-btn, .list-row, .row-action, #queue-btn, .action-btn, .new-playlist-row, .save-queue-btn, #like-btn, #np-download-btn, #history-btn, .liked-songs-row';
-document.addEventListener('click', (e) => {
-  const el = e.target as Element;
-  const target = el.closest?.(clickSelectors);
-  if (target) {
-    target.classList.add('clicked');
-    setTimeout(() => target.classList.remove('clicked'), 200);
-  }
-}, true);
+const clickSelectors =
+  '.nav-btn, .control-btn, .list-row, .row-action, #queue-btn, .action-btn, .new-playlist-row, .save-queue-btn, #like-btn, #np-download-btn, #history-btn, .liked-songs-row';
+document.addEventListener(
+  'click',
+  (e) => {
+    const el = e.target as Element;
+    const target = el.closest?.(clickSelectors);
+    if (target) {
+      target.classList.add('clicked');
+      setTimeout(() => target.classList.remove('clicked'), 200);
+    }
+  },
+  true,
+);
 
 // Initialize nav to now-playing
 navigateTo('now-playing');

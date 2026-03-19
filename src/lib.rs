@@ -1,16 +1,15 @@
-//! plexus-mono — Monochrome music API Plexus RPC activation
+//! plexus-music — Generic music player library
 //!
-//! Exposes the Monochrome / Hi-Fi Tidal proxy API as a Plexus RPC activation:
-//! track metadata, album listings, artist info, search, lyrics,
-//! recommendations, and cover art.
+//! Provider traits, playback engine, queue management, playlists,
+//! audio proxy, and RPC server infrastructure. Provider-agnostic:
+//! implement `MusicProvider` to plug in any streaming backend.
 
 pub mod audio_server;
-pub mod client;
-pub mod hub;
 pub mod player;
 pub mod player_hub;
 pub mod playlist;
-pub mod sanity;
+pub mod provider;
+pub mod server;
 pub mod storage;
 pub mod types;
 
@@ -18,7 +17,7 @@ pub mod types;
 pub use plexus_core::serde_helpers;
 
 // Re-exports for convenience
-pub use hub::MonoHub;
 pub use player_hub::PlayerHub;
-pub use sanity::SanityHub;
-pub use types::{MonoEvent, SearchKind};
+pub use provider::MusicProvider;
+pub use server::{build_player, run_main_loop, serve, MusicServerConfig};
+pub use types::{MonoEvent, MusicEvent, SearchKind};

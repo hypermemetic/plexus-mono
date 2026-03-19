@@ -3,7 +3,7 @@
 //! Five capability traits that abstract over the concrete music backend.
 //! Each trait is independently implementable — a lyrics-only provider
 //! (e.g. Genius) can implement just `MusicLyrics`, while a full provider
-//! like Monochrome implements all five.
+//! implements all five.
 
 use async_trait::async_trait;
 
