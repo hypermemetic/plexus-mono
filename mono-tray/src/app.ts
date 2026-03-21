@@ -1,7 +1,7 @@
 import { PlexusRpcClient } from '../generated/transport';
 import { createPlayerClient } from '../generated/player/client';
 import { createPlayerPlaylistClient } from '../generated/player/playlist/client';
-import { createMonochromeClient } from '../generated/monochrome/client';
+import { createProviderClient } from '../generated/provider/client';
 import type {
   MonoEvent,
   MonoEventNowPlaying,
@@ -26,7 +26,7 @@ const appEl = document.getElementById('app')!;
 const appWindow = getCurrentWindow();
 let hiding = false;
 
-type ViewName = 'now-playing' | 'browse' | 'detail' | 'queue' | 'research' | 'history';
+type ViewName = 'now-playing' | 'browse' | 'detail' | 'queue' | 'research' | 'history' | 'settings';
 
 const VIEW_HEIGHTS: Record<ViewName, number> = {
   'now-playing': 582,
@@ -35,6 +35,7 @@ const VIEW_HEIGHTS: Record<ViewName, number> = {
   queue: 600,
   research: 650,
   history: 600,
+  settings: 500,
 };
 
 listen('mono-tray://show', () => {
@@ -97,7 +98,7 @@ const queueTracksEl = document.getElementById('queue-tracks')!;
 const breadcrumbs = document.getElementById('breadcrumbs')!;
 
 // --- State ---
-let currentTrackId: number | null = null;
+let currentTrackId: string | null = null;
 let currentDurationSecs = 0;
 let isPlaying = false;
 let volumeDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -105,7 +106,7 @@ let notificationsEnabled = false;
 let currentView: ViewName = 'now-playing';
 let cachedPlaylists: MonoEventPlaylistInfo[] | null = null;
 let currentPlaylistName: string | null = null;
-let currentDetailAlbumId: number | null = null;
+let currentDetailAlbumId: string | null = null;
 let searchDebounce: ReturnType<typeof setTimeout> | null = null;
 let activeSearchGen: AsyncGenerator | null = null;
 let browseScrollTop = 0;
@@ -138,9 +139,9 @@ let searchKind: 'tracks' | 'albums' | 'artists' = 'tracks';
 let lastEnterTime = 0;
 let researchResult: { name: string; tracks: ResearchTrack[] } | null = null;
 let isResearching = false;
-let pendingAddTrackId: number | null = null;
+let pendingAddTrackId: string | null = null;
 let claudeSessionReady = false;
-const likedSet = new Set<number>();
+const likedSet = new Set<string>();
 
 // New DOM elements
 const sparkleBtn = document.getElementById('sparkle-btn')!;
@@ -169,15 +170,15 @@ const peakBuffer = new Float32Array(PEAK_BUFFER_SIZE);
 let peakWriteIndex = 0;
 let peakBufferFilled = 0;
 let silenceSince: number | null = null;
-let lastWaveformTrackId: number | null = null;
+let lastWaveformTrackId: string | null = null;
 
 // --- Audio failover state ---
 // Hidden <audio> element buffers the current track for instant takeover on disconnect
-const AUDIO_HTTP_PORT = 4450;
+// Audio proxy port derived from music backend (port + 2)
 const audioFailoverEl = new Audio();
 audioFailoverEl.preload = 'auto';
 audioFailoverEl.muted = true;
-let audioBufferTrackId: number | null = null;
+let audioBufferTrackId: string | null = null;
 let audioFetchAbort: AbortController | null = null;
 let audioFailoverActive = false;
 let audioFailoverBlobUrl: string | null = null;
@@ -186,12 +187,12 @@ let audioFailoverBlobUrl: string | null = null;
 const audioNextEl = new Audio();
 audioNextEl.preload = 'auto';
 audioNextEl.muted = true;
-let audioNextTrackId: number | null = null;
+let audioNextTrackId: string | null = null;
 let audioNextBlobUrl: string | null = null;
 let audioNextFetchAbort: AbortController | null = null;
 
 /** Buffer the full audio file for a track from the HTTP audio proxy */
-function bufferTrackAudio(trackId: number): void {
+function bufferTrackAudio(trackId: string): void {
   // Abort previous fetch
   if (audioFetchAbort) audioFetchAbort.abort();
   audioFetchAbort = new AbortController();
@@ -203,7 +204,7 @@ function bufferTrackAudio(trackId: number): void {
   }
   audioBufferTrackId = trackId;
 
-  const url = `http://127.0.0.1:${AUDIO_HTTP_PORT}/audio/${trackId}?quality=LOSSLESS`;
+  const url = `${AUDIO_PROXY_URL}/audio/${trackId}?quality=LOSSLESS`;
   fetch(url, { signal: audioFetchAbort.signal })
     .then((resp) => {
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -233,6 +234,7 @@ async function prefetchNextTrack(): Promise<void> {
     for await (const event of player.queueGet()) {
       if (event.type === 'queue') {
         const q = event as MonoEventQueue;
+        for (const t of q.tracks) cacheCoverFromTrack(t);
         const nextTrack = q.tracks[0]; // first in queue = next up
         if (!nextTrack || nextTrack.id === audioNextTrackId) return;
 
@@ -245,7 +247,7 @@ async function prefetchNextTrack(): Promise<void> {
         }
 
         audioNextTrackId = nextTrack.id;
-        const url = `http://127.0.0.1:${AUDIO_HTTP_PORT}/audio/${nextTrack.id}?quality=LOSSLESS`;
+        const url = `${AUDIO_PROXY_URL}/audio/${nextTrack.id}?quality=LOSSLESS`;
         const resp = await fetch(url, { signal: audioNextFetchAbort.signal });
         if (!resp.ok) return;
         const blob = await resp.blob();
@@ -313,24 +315,88 @@ function notifyTrackChange(np: MonoEventNowPlaying): void {
 
 initNotifications();
 
+// --- Provider configuration ---
+interface ProviderConfig {
+  name: string;
+  musicUrl: string;
+  substrateUrl: string;
+}
+
+const DEFAULT_PROVIDERS: ProviderConfig[] = [
+  { name: 'Monochrome', musicUrl: 'ws://127.0.0.1:4448', substrateUrl: 'ws://127.0.0.1:4444' },
+  { name: 'Royalty Free', musicUrl: 'ws://127.0.0.1:4449', substrateUrl: 'ws://127.0.0.1:4444' },
+];
+
+function loadProviders(): ProviderConfig[] {
+  try {
+    const stored = localStorage.getItem('plexus-providers');
+    if (stored) {
+      const parsed = JSON.parse(stored) as ProviderConfig[];
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch { /* use defaults */ }
+  return DEFAULT_PROVIDERS;
+}
+
+function saveProviders(providers: ProviderConfig[]): void {
+  localStorage.setItem('plexus-providers', JSON.stringify(providers));
+}
+
+function getActiveProvider(): ProviderConfig {
+  const providers = loadProviders();
+  const activeName = localStorage.getItem('plexus-active-provider');
+  return providers.find(p => p.name === activeName) ?? providers[0] ?? DEFAULT_PROVIDERS[0]!;
+}
+
+function setActiveProvider(name: string): void {
+  localStorage.setItem('plexus-active-provider', name);
+}
+
+// URL params override stored config
+const params = new URLSearchParams(window.location.search);
+const activeProvider = getActiveProvider();
+const MUSIC_URL = params.get('music') ?? activeProvider.musicUrl;
+const SUBSTRATE_URL = params.get('substrate') ?? activeProvider.substrateUrl;
+
+// Derive audio proxy URL from music backend host/port
+const musicUrl = new URL(MUSIC_URL.replace('ws://', 'http://').replace('wss://', 'https://'));
+const AUDIO_PROXY_URL = `http://${musicUrl.hostname}:${Number(musicUrl.port) + 2}`;
+
 // --- RPC client ---
 const rpc = new PlexusRpcClient({
   backend: 'music',
-  url: 'ws://127.0.0.1:4448',
+  url: MUSIC_URL,
   debug: false,
 });
 
 const player = createPlayerClient(rpc);
 const playlist = createPlayerPlaylistClient(rpc);
-const mono = createMonochromeClient(rpc);
+const provider = createProviderClient(rpc);
 
 // Substrate RPC client for AI research (claudecode)
 const substrateRpc = new PlexusRpcClient({
   backend: 'substrate',
-  url: 'ws://127.0.0.1:4444',
+  url: SUBSTRATE_URL,
   debug: false,
 });
 const claudecode = createClaudecodeClient(substrateRpc);
+
+/** Play a track with immediate UI feedback — shows loading state before RPC responds */
+function playTrack(trackId: string, title?: string, artist?: string): void {
+  // Immediately show loading state on now-playing view
+  titleEl.textContent = title || 'Loading...';
+  artistAlbumEl.textContent = artist || '';
+  timeCurrent.textContent = '0:00';
+  timeTotal.textContent = '0:00';
+  progressFill.style.width = '0%';
+  progressThumb.style.left = '0%';
+  albumArt.classList.remove('loaded');
+  albumArt.removeAttribute('src');
+  iconPlay.style.display = 'none';
+  iconPause.style.display = '';
+  navigateTo('now-playing');
+  rpcFire(player.play(trackId));
+}
 
 // Fire-and-forget RPC helper
 async function rpcFire(gen: AsyncGenerator): Promise<void> {
@@ -351,10 +417,17 @@ function formatTime(secs: number): string {
 }
 
 // --- Cover art cache ---
-const coverCache = new Map<number, string>();
-const coverInflight = new Map<number, Promise<string | null>>();
+const coverCache = new Map<string, string>();
+const coverInflight = new Map<string, Promise<string | null>>();
 
-async function getCoverUrl(trackId: number): Promise<string | null> {
+/** Seed the cover cache from a QueuedTrack's coverId if it's a URL */
+function cacheCoverFromTrack(track: QueuedTrack): void {
+  if (track.coverId?.startsWith('http')) {
+    coverCache.set(track.id, track.coverId);
+  }
+}
+
+async function getCoverUrl(trackId: string): Promise<string | null> {
   const cached = coverCache.get(trackId);
   if (cached) return cached;
 
@@ -363,7 +436,8 @@ async function getCoverUrl(trackId: number): Promise<string | null> {
 
   const promise = (async (): Promise<string | null> => {
     try {
-      for await (const event of mono.cover(trackId, 640)) {
+
+      for await (const event of provider.cover(trackId)) {
         if (event.type === 'cover') {
           const url = (event as MonoEventCover).url;
           coverCache.set(trackId, url);
@@ -371,7 +445,7 @@ async function getCoverUrl(trackId: number): Promise<string | null> {
         }
       }
     } catch {
-      /* no cover */
+      /* no cover — provider may not have a cover endpoint */
     }
     return null;
   })();
@@ -382,7 +456,7 @@ async function getCoverUrl(trackId: number): Promise<string | null> {
   return result;
 }
 
-async function fetchCoverArt(trackId: number): Promise<void> {
+async function fetchCoverArt(trackId: string): Promise<void> {
   const url = await getCoverUrl(trackId);
   if (url) {
     albumArt.src = url;
@@ -392,13 +466,13 @@ async function fetchCoverArt(trackId: number): Promise<void> {
   }
 }
 
-const DOWNLOAD_DIR = '~/Music/mono-tray';
+// Download directory is now configured on the backend via MusicServerConfig
 const downloadIcon =
   '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>';
 const checkIcon =
   '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>';
 
-function makeDownloadBtn(trackId: number): HTMLButtonElement {
+function makeDownloadBtn(trackId: string): HTMLButtonElement {
   const btn = document.createElement('button');
   btn.className = 'row-action';
   btn.title = 'Download';
@@ -409,7 +483,7 @@ function makeDownloadBtn(trackId: number): HTMLButtonElement {
     btn.innerHTML =
       '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" class="spin"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="31.4 31.4" stroke-linecap="round"/></svg>';
     try {
-      for await (const event of mono.download(trackId, DOWNLOAD_DIR)) {
+      for await (const event of player.downloadTrack(trackId)) {
         if (event.type === 'download_progress') {
           const pct = (event as any).percent;
           if (pct != null) btn.title = `${Math.round(pct)}%`;
@@ -481,18 +555,21 @@ function makeArtistLink(name: string): HTMLSpanElement {
   return span;
 }
 
-function makeAlbumLink(albumName: string, trackId?: number | null): HTMLSpanElement {
+function makeAlbumLink(albumName: string, trackId?: string | null): HTMLSpanElement {
   const span = document.createElement('span');
-  span.className = 'clickable-meta';
   span.textContent = albumName;
-  span.addEventListener('click', (e) => {
-    e.stopPropagation();
-    navigateToAlbum(albumName, trackId ?? undefined);
-  });
+  // Only make clickable if it looks like a real album (not a genre tag like "CC · jazz · jamendo")
+  if (albumName && !albumName.startsWith('CC ·')) {
+    span.className = 'clickable-meta';
+    span.addEventListener('click', (e) => {
+      e.stopPropagation();
+      navigateToAlbum(albumName, trackId ?? undefined);
+    });
+  }
   return span;
 }
 
-async function navigateToAlbum(albumName: string, trackId?: number): Promise<void> {
+async function navigateToAlbum(albumName: string, trackId?: string): Promise<void> {
   currentPlaylistName = albumName;
   navigateTo('detail');
   detailTracks.innerHTML = '';
@@ -501,7 +578,7 @@ async function navigateToAlbum(albumName: string, trackId?: number): Promise<voi
   // If we have a trackId, look up the track to get the real albumId
   if (trackId) {
     try {
-      for await (const event of mono.track(trackId)) {
+      for await (const event of provider.track(trackId)) {
         if (event.type === 'track') {
           loadAlbumDetail((event as import('../generated/player/types').MonoEventTrack).albumId);
           return;
@@ -513,7 +590,7 @@ async function navigateToAlbum(albumName: string, trackId?: number): Promise<voi
   }
 
   // Fallback: search by album name
-  for await (const event of mono.search(albumName, 'albums', 5)) {
+  for await (const event of provider.search(albumName, 'albums', 5)) {
     if (event.type === 'search_album') {
       const album = event as MonoEventSearchAlbum;
       if (album.title.toLowerCase() === albumName.toLowerCase()) {
@@ -523,7 +600,7 @@ async function navigateToAlbum(albumName: string, trackId?: number): Promise<voi
     }
   }
   // Last resort: first result
-  for await (const event of mono.search(albumName, 'albums', 1)) {
+  for await (const event of provider.search(albumName, 'albums', 1)) {
     if (event.type === 'search_album') {
       loadAlbumDetail((event as MonoEventSearchAlbum).id);
       return;
@@ -535,7 +612,7 @@ async function navigateToAlbum(albumName: string, trackId?: number): Promise<voi
 /** Build a subtitle element with clickable artist/album spans */
 function makeTrackSub(
   artist: string,
-  opts?: { album?: string; durationSecs?: number; trackId?: number },
+  opts?: { album?: string; durationSecs?: number; trackId?: string },
 ): HTMLDivElement {
   const sub = document.createElement('div');
   sub.className = 'list-row-sub';
@@ -602,9 +679,9 @@ function updateUI(np: MonoEventNowPlaying): void {
     queueInfo.textContent = '';
   }
 
-  if (np.trackId) {
+  if (np.url) {
     openLink.style.display = '';
-    openLink.dataset['url'] = `https://monochrome.tf/track/t/${np.trackId}`;
+    openLink.dataset['url'] = np.url;
   } else {
     openLink.style.display = 'none';
   }
@@ -881,6 +958,14 @@ function navigateTo(view: ViewName): void {
       iconClear.classList.add('hidden');
       navAction.classList.add('hidden');
       break;
+    case 'settings':
+      navBack.classList.remove('hidden');
+      navTitle.textContent = 'Providers';
+      iconList.classList.add('hidden');
+      iconPlayAll.classList.add('hidden');
+      iconClear.classList.add('hidden');
+      navAction.classList.add('hidden');
+      break;
   }
 }
 
@@ -1046,7 +1131,7 @@ function performSearch(query: string): void {
   const q = query.toLowerCase();
   const matchingPlaylists = (cachedPlaylists || []).filter((pl) => pl.name.toLowerCase().includes(q));
 
-  const gen = mono.search(query, searchKind, 12);
+  const gen = provider.search(query, searchKind, 12);
   activeSearchGen = gen;
 
   browseList.innerHTML = '';
@@ -1180,8 +1265,7 @@ function renderSearchResults(results: MonoEventSearchTrack[], hasPlaylistSection
       '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
     playBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      rpcFire(player.play(track.id));
-      navigateTo('now-playing');
+      playTrack(track.id, track.title, track.artist);
     });
 
     // Queue add button
@@ -1312,7 +1396,7 @@ function renderArtistResults(results: MonoEventSearchArtist[]): void {
 }
 
 // --- Album detail (reuses detail view) ---
-async function loadAlbumDetail(albumId: number): Promise<void> {
+async function loadAlbumDetail(albumId: string): Promise<void> {
   currentDetailAlbumId = albumId;
   detailTracks.innerHTML = '';
   detailSubheader.textContent = 'Loading...';
@@ -1323,12 +1407,12 @@ async function loadAlbumDetail(albumId: number): Promise<void> {
   try {
     let albumInfo: MonoEventAlbum | null = null;
     const tracks: MonoEventAlbumTrack[] = [];
-    for await (const event of mono.album(albumId)) {
+    for await (const event of provider.album(albumId)) {
       if (event.type === 'album') albumInfo = event as MonoEventAlbum;
       if (event.type === 'album_track') tracks.push(event as MonoEventAlbumTrack);
     }
 
-    // Load cover art from first track (mono.cover needs track IDs, not album IDs)
+    // Load cover art from first track (provider.cover needs track IDs, not album IDs)
     const firstTrack = tracks[0];
     if (firstTrack) {
       getCoverUrl(firstTrack.id).then((url) => {
@@ -1370,7 +1454,7 @@ async function loadAlbumDetail(albumId: number): Promise<void> {
         dlAllBtn.classList.add('downloading');
         for (const t of tracks) {
           try {
-            for await (const ev of mono.download(t.id, DOWNLOAD_DIR)) {
+            for await (const ev of player.downloadTrack(t.id)) {
               if (ev.type === 'download_complete') break;
             }
           } catch {
@@ -1408,8 +1492,7 @@ async function loadAlbumDetail(albumId: number): Promise<void> {
       const row = document.createElement('div');
       row.className = 'list-row';
       row.addEventListener('click', () => {
-        rpcFire(player.play(track.id));
-        navigateTo('now-playing');
+        playTrack(track.id, track.title, track.artist);
       });
 
       const info = document.createElement('div');
@@ -1463,7 +1546,7 @@ async function loadAlbumDetail(albumId: number): Promise<void> {
 }
 
 // --- Artist albums (reuses detail view) ---
-async function loadArtistAlbums(_artistId: number, artistName: string): Promise<void> {
+async function loadArtistAlbums(_artistId: number | string, artistName: string): Promise<void> {
   currentDetailAlbumId = null;
   detailTracks.innerHTML = '';
   detailSubheader.textContent = 'Loading...';
@@ -1473,7 +1556,7 @@ async function loadArtistAlbums(_artistId: number, artistName: string): Promise<
   try {
     // Search for albums by this artist
     const albums: MonoEventSearchAlbum[] = [];
-    for await (const event of mono.search(artistName, 'albums', 20)) {
+    for await (const event of provider.search(artistName, 'albums', 20)) {
       if (event.type === 'search_album') {
         const album = event as MonoEventSearchAlbum;
         // Filter to only this artist's albums
@@ -1585,8 +1668,7 @@ async function loadPlaylistDetail(name: string): Promise<void> {
       const row = document.createElement('div');
       row.className = 'list-row';
       row.addEventListener('click', () => {
-        rpcFire(player.play(track.id));
-        navigateTo('now-playing');
+        playTrack(track.id, track.title, track.artist);
       });
 
       const info = document.createElement('div');
@@ -1648,6 +1730,8 @@ async function loadQueue(): Promise<void> {
         const q = event as MonoEventQueue;
         tracks = q.tracks;
         currentIndex = q.currentIndex;
+        // Seed cover cache from queue track coverId URLs
+        for (const t of tracks) cacheCoverFromTrack(t);
       }
     }
 
@@ -1708,8 +1792,7 @@ async function loadQueue(): Promise<void> {
       if (i === currentIndex) row.classList.add('active');
 
       row.addEventListener('click', () => {
-        rpcFire(player.play(track.id));
-        navigateTo('now-playing');
+        playTrack(track.id, track.title, track.artist);
       });
 
       const info = document.createElement('div');
@@ -1757,6 +1840,8 @@ navBack.addEventListener('click', () => {
   } else if (currentView === 'research') {
     navigateTo('browse');
   } else if (currentView === 'history') {
+    navigateTo('now-playing');
+  } else if (currentView === 'settings') {
     navigateTo('now-playing');
   }
 });
@@ -1886,7 +1971,7 @@ progressBar.addEventListener('pointerup', (e) => {
   rpcFire(player.seek(seekPos));
 });
 
-// Open on Monochrome
+// Open track URL (provider-specific)
 openLink.addEventListener('click', async (e) => {
   e.preventDefault();
   const url = openLink.dataset['url'];
@@ -1908,7 +1993,7 @@ function promptCreatePlaylist(): void {
   }
 }
 
-function showPlaylistPicker(trackId: number): void {
+function showPlaylistPicker(trackId: string): void {
   pendingAddTrackId = trackId;
   playlistPickerList.innerHTML = '';
 
@@ -1965,7 +2050,7 @@ navTitle.addEventListener('dblclick', () => {
 
 // --- AI Research ---
 interface ResearchTrack {
-  id: number;
+  id: string;
   title: string;
   artist: string;
   reason: string;
@@ -1989,7 +2074,6 @@ async function ensureClaudeSession(): Promise<void> {
       RESEARCH_SESSION,
       '/tmp',
       false,
-      null,
       `You are a music researcher and playlist curator. You have access to WebSearch to research music themes, genres, artists, and tracks.
 
 When asked to research a theme, use WebSearch to find artists, albums, and tracks that match. Then return a JSON object with search terms for finding those in a music catalog.
@@ -2013,9 +2097,9 @@ function parseResearchJson(text: string): { name: string; tracks: ResearchTrack[
     const parsed = JSON.parse(jsonMatch[0]);
     if (typeof parsed.name !== 'string' || !Array.isArray(parsed.tracks)) return null;
     const tracks: ResearchTrack[] = parsed.tracks
-      .filter((t: any) => typeof t.id === 'number' && typeof t.title === 'string')
+      .filter((t: any) => (typeof t.id === 'number' || typeof t.id === 'string') && typeof t.title === 'string')
       .map((t: any) => ({
-        id: t.id,
+        id: String(t.id),
         title: t.title,
         artist: t.artist || 'Unknown',
         reason: t.reason || '',
@@ -2044,11 +2128,11 @@ function parseSearchSuggestions(text: string): string[] | null {
 
 async function askClaude(
   prompt: string,
-  allowedTools?: string[],
+  _allowedTools?: string[],
   onToolUse?: (toolName: string) => void,
 ): Promise<string> {
   let fullResponse = '';
-  for await (const event of claudecode.chat(RESEARCH_SESSION, prompt, allowedTools)) {
+  for await (const event of claudecode.chat(RESEARCH_SESSION, prompt)) {
     if (event.type === 'content') {
       fullResponse += event.text;
     } else if (event.type === 'tool_use' && onToolUse) {
@@ -2103,7 +2187,7 @@ Return 10-20 specific, varied search terms. Mix artist names, album titles, and 
 
     // ── Phase 2: Search Tidal ──
     let allTracks: MonoEventSearchTrack[] = [];
-    const seenTrackIds = new Set<number>();
+    const seenTrackIds = new Set<string>();
 
     if (searchSuggestions && searchSuggestions.length > 0) {
       // AI-guided search: search for each suggestion in parallel
@@ -2113,15 +2197,15 @@ Return 10-20 specific, varied search terms. Mix artist names, album titles, and 
       const searchPromises = searchSuggestions.map(async (term) => {
         const tracks: MonoEventSearchTrack[] = [];
         try {
-          for await (const event of mono.search(term, 'tracks', 10)) {
+          for await (const event of provider.search(term, 'tracks', 10)) {
             if (event.type === 'search_track') tracks.push(event as MonoEventSearchTrack);
           }
           // Also search albums for broader coverage
-          for await (const event of mono.search(term, 'albums', 5)) {
+          for await (const event of provider.search(term, 'albums', 5)) {
             if (event.type === 'search_album') {
               // Search for tracks within found albums by album name + artist
               const album = event as MonoEventSearchAlbum;
-              for await (const trackEvent of mono.search(`${album.title} ${album.artist}`, 'tracks', 5)) {
+              for await (const trackEvent of provider.search(`${album.title} ${album.artist}`, 'tracks', 5)) {
                 if (trackEvent.type === 'search_track') tracks.push(trackEvent as MonoEventSearchTrack);
               }
             }
@@ -2148,7 +2232,7 @@ Return 10-20 specific, varied search terms. Mix artist names, album titles, and 
     // Fallback: if AI research found nothing (or was skipped), do direct search
     if (allTracks.length === 0) {
       setResearchStatus('Searching tracks...');
-      for await (const event of mono.search(query, 'tracks', 50)) {
+      for await (const event of provider.search(query, 'tracks', 50)) {
         if (event.type === 'search_track') {
           const track = event as MonoEventSearchTrack;
           if (!seenTrackIds.has(track.id)) {
@@ -2296,7 +2380,7 @@ function showResearchResults(): void {
       '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
     playBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      rpcFire(player.play(track.id));
+      playTrack(track.id, track.title, track.artist);
     });
 
     // Queue button
@@ -2480,8 +2564,7 @@ async function loadHistory(): Promise<void> {
       const row = document.createElement('div');
       row.className = 'list-row';
       row.addEventListener('click', () => {
-        rpcFire(player.play(track.id));
-        navigateTo('now-playing');
+        playTrack(track.id, track.title, track.artist);
       });
       const info = document.createElement('div');
       info.className = 'list-row-info';
@@ -2686,6 +2769,139 @@ document.addEventListener(
   },
   true,
 );
+
+// --- Provider settings UI ---
+const settingsList = document.getElementById('settings-list')!;
+const settingsAdd = document.getElementById('settings-add')!;
+
+function renderSettings(): void {
+  const providers = loadProviders();
+  const active = getActiveProvider();
+  settingsList.innerHTML = '';
+
+  // Current connection indicator
+  const connInfo = document.createElement('div');
+  connInfo.className = 'settings-conn-info';
+  const label = document.createElement('span');
+  label.className = 'settings-label';
+  label.textContent = 'Connected to ';
+  const name = document.createElement('strong');
+  name.textContent = active.name;
+  const br = document.createElement('br');
+  const urlSpan = document.createElement('span');
+  urlSpan.className = 'settings-url';
+  urlSpan.textContent = MUSIC_URL;
+  connInfo.append(label, name, br, urlSpan);
+  settingsList.appendChild(connInfo);
+
+  for (const p of providers) {
+    const row = document.createElement('div');
+    row.className = 'list-row' + (p.name === active.name ? ' active' : '');
+
+    const info = document.createElement('div');
+    info.className = 'list-row-info';
+
+    const titleSpan = document.createElement('div');
+    titleSpan.className = 'list-row-title';
+    titleSpan.textContent = p.name;
+
+    const sub = document.createElement('div');
+    sub.className = 'list-row-sub';
+    sub.textContent = p.musicUrl;
+
+    info.appendChild(titleSpan);
+    info.appendChild(sub);
+
+    // Switch button
+    const switchBtn = document.createElement('button');
+    switchBtn.className = 'row-action';
+    switchBtn.title = p.name === active.name ? 'Active' : 'Switch to this provider';
+    switchBtn.innerHTML = p.name === active.name
+      ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="var(--accent)"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>'
+      : '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8z"/></svg>';
+    switchBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (p.name !== active.name) {
+        setActiveProvider(p.name);
+        window.location.reload();
+      }
+    });
+
+    // Delete button (don't allow deleting the last provider)
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'row-action';
+    deleteBtn.title = 'Remove provider';
+    deleteBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>';
+    deleteBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const updated = loadProviders().filter(x => x.name !== p.name);
+      if (updated.length === 0) return;
+      saveProviders(updated);
+      if (p.name === active.name) {
+        setActiveProvider(updated[0]!.name);
+        window.location.reload();
+      } else {
+        renderSettings();
+      }
+    });
+
+    // Edit on click
+    row.addEventListener('click', () => promptEditProvider(p));
+
+    row.appendChild(info);
+    row.appendChild(switchBtn);
+    if (providers.length > 1) row.appendChild(deleteBtn);
+    settingsList.appendChild(row);
+  }
+}
+
+function promptAddProvider(): void {
+  const name = prompt('Provider name:');
+  if (!name) return;
+  const musicUrl = prompt('Music WebSocket URL:', 'ws://127.0.0.1:4448');
+  if (!musicUrl) return;
+  const substrateUrl = prompt('Substrate WebSocket URL (optional):', 'ws://127.0.0.1:4444') ?? 'ws://127.0.0.1:4444';
+
+  const providers = loadProviders();
+  if (providers.some(p => p.name === name)) {
+    alert(`Provider "${name}" already exists`);
+    return;
+  }
+  providers.push({ name, musicUrl, substrateUrl });
+  saveProviders(providers);
+  renderSettings();
+}
+
+function promptEditProvider(p: ProviderConfig): void {
+  const musicUrl = prompt(`Music URL for "${p.name}":`, p.musicUrl);
+  if (!musicUrl) return;
+  const substrateUrl = prompt(`Substrate URL for "${p.name}":`, p.substrateUrl) ?? p.substrateUrl;
+
+  const providers = loadProviders();
+  const existing = providers.find(x => x.name === p.name);
+  if (existing) {
+    existing.musicUrl = musicUrl;
+    existing.substrateUrl = substrateUrl;
+    saveProviders(providers);
+    if (p.name === getActiveProvider().name) {
+      window.location.reload();
+    } else {
+      renderSettings();
+    }
+  }
+}
+
+settingsAdd.addEventListener('click', promptAddProvider);
+
+// Connection dot opens settings
+connDot.addEventListener('click', () => {
+  if (currentView === 'settings') {
+    navigateTo('now-playing');
+  } else {
+    renderSettings();
+    navigateTo('settings');
+  }
+});
 
 // Initialize nav to now-playing
 navigateTo('now-playing');

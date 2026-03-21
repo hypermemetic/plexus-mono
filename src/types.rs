@@ -13,7 +13,7 @@ pub enum MonoEvent {
     /// Track metadata from /info/?id=
     Track {
         /// Track ID
-        id: u64,
+        id: String,
         /// Track title (including version if present)
         title: String,
         /// Primary artist name
@@ -21,7 +21,7 @@ pub enum MonoEvent {
         /// Album title
         album: String,
         /// Album ID
-        album_id: u64,
+        album_id: String,
         /// Duration in seconds
         duration_secs: u64,
         /// Track number within the album
@@ -37,7 +37,7 @@ pub enum MonoEvent {
     /// Album metadata from /album/?id=
     Album {
         /// Album ID
-        id: u64,
+        id: String,
         /// Album title
         title: String,
         /// Primary artist name
@@ -57,7 +57,7 @@ pub enum MonoEvent {
         /// 1-based position in the album
         position: u32,
         /// Track ID
-        id: u64,
+        id: String,
         /// Track title
         title: String,
         /// Primary artist name
@@ -71,7 +71,7 @@ pub enum MonoEvent {
     /// Artist information from /artist/?id=
     Artist {
         /// Artist ID
-        id: u64,
+        id: String,
         /// Artist name
         name: String,
         /// Picture identifier
@@ -85,7 +85,7 @@ pub enum MonoEvent {
         /// 0-based rank in results
         rank: u32,
         /// Track ID
-        id: u64,
+        id: String,
         /// Track title
         title: String,
         /// Primary artist name
@@ -103,7 +103,7 @@ pub enum MonoEvent {
         /// 0-based rank in results
         rank: u32,
         /// Album ID
-        id: u64,
+        id: String,
         /// Album title
         title: String,
         /// Primary artist name
@@ -121,7 +121,7 @@ pub enum MonoEvent {
         /// 0-based rank in results
         rank: u32,
         /// Artist ID
-        id: u64,
+        id: String,
         /// Artist name
         name: String,
     },
@@ -139,7 +139,7 @@ pub enum MonoEvent {
         /// 0-based rank in results
         rank: u32,
         /// Track ID
-        id: u64,
+        id: String,
         /// Track title
         title: String,
         /// Primary artist name
@@ -159,7 +159,7 @@ pub enum MonoEvent {
     /// Resolved stream manifest from /track/?id= (use url immediately — it expires)
     StreamManifest {
         /// Track ID
-        id: u64,
+        id: String,
         /// Pre-signed direct CDN URL — short-lived, use within seconds
         url: String,
         /// MIME type: "audio/flac", "audio/mp4", "audio/mpeg"
@@ -211,7 +211,7 @@ pub enum MonoEvent {
     /// Current playback state — streamed ~1s via now_playing
     NowPlaying {
         /// Currently playing track ID
-        track_id: Option<u64>,
+        track_id: Option<String>,
         /// Track title
         title: Option<String>,
         /// Artist name
@@ -252,7 +252,7 @@ pub enum MonoEvent {
     /// Buffered waveform peak history for instant rendering on connect
     Waveform {
         /// Track ID these peaks belong to
-        track_id: u64,
+        track_id: String,
         /// Peak values (0.0–1.0) in chronological order, ~30fps
         peaks: Vec<f32>,
     },
@@ -290,7 +290,7 @@ pub enum MonoEvent {
     /// Per-track listening statistics
     TrackStats {
         /// Track ID
-        id: u64,
+        id: String,
         /// Track title
         title: String,
         /// Primary artist name
@@ -314,7 +314,7 @@ pub enum MonoEvent {
     /// Individual listen log entry
     ListenEvent {
         /// Track ID
-        track_id: u64,
+        track_id: String,
         /// ISO 8601 timestamp when playback started
         started_at: String,
         /// How long the user actually listened (seconds)
@@ -368,7 +368,8 @@ pub enum PlayStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct QueuedTrack {
     /// Track ID
-    pub id: u64,
+    #[serde(deserialize_with = "deserialize_string_or_number")]
+    pub id: String,
     /// Track title
     pub title: String,
     /// Primary artist name
@@ -415,7 +416,7 @@ pub enum ListenOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TrackStats {
     /// Track ID
-    pub id: u64,
+    pub id: String,
     /// Track title
     pub title: String,
     /// Primary artist name
@@ -440,11 +441,52 @@ pub struct TrackStats {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ListenEvent {
     /// Track ID
-    pub track_id: u64,
+    pub track_id: String,
     /// ISO 8601 timestamp when playback started
     pub started_at: String,
     /// How long the user actually listened (seconds)
     pub duration_listened: f32,
     /// How the listen session ended
     pub outcome: ListenOutcome,
+}
+
+/// Deserialize a value that may be either a string or a number into a String.
+/// Handles migration from old JSON files where IDs were stored as integers.
+fn deserialize_string_or_number<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct StringOrNumber;
+
+    impl de::Visitor<'_> for StringOrNumber {
+        type Value = String;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a string or number")
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+
+        fn visit_string<E: de::Error>(self, v: String) -> Result<String, E> {
+            Ok(v)
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+
+        fn visit_f64<E: de::Error>(self, v: f64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+    }
+
+    deserializer.deserialize_any(StringOrNumber)
 }

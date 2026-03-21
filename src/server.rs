@@ -30,14 +30,25 @@ pub struct MusicServerConfig {
     pub audio_port: Option<u16>,
     /// Path to the SQLite database for likes & downloads
     pub db_path: PathBuf,
+    /// Base directory for player state, playlists, and other persistent data.
+    /// e.g. `~/.plexus/monochrome/` for monochrome, `~/.plexus/myfm/` for another provider.
+    pub data_dir: PathBuf,
+    /// Optional URL template for track links (e.g. "https://monochrome.tf/track/t/{}").
+    /// `{}` is replaced with the track ID. If `None`, NowPlaying.url is always None.
+    pub track_url_template: Option<String>,
 }
 
 impl MusicServerConfig {
-    /// Default db path: ~/.plexus/monochrome/mono.db
-    pub fn default_db_path() -> PathBuf {
+    /// Default data directory for a named app: `~/.plexus/{app_name}/`
+    pub fn default_data_dir(app_name: &str) -> PathBuf {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".plexus/monochrome/mono.db")
+            .join(format!(".plexus/{app_name}"))
+    }
+
+    /// Default db path within a data directory: `{data_dir}/mono.db`
+    pub fn default_db_path(data_dir: &std::path::Path) -> PathBuf {
+        data_dir.join("mono.db")
     }
 }
 
@@ -59,7 +70,13 @@ pub async fn build_player(
     );
 
     // Build the player activation (stateful — audio engine + queue + playlists)
-    let player_hub = PlayerHub::new(provider, storage).await;
+    let player_hub = PlayerHub::new(
+        provider,
+        storage,
+        config.data_dir.clone(),
+        config.track_url_template.clone(),
+    )
+    .await;
 
     // SIGTERM handler — graceful shutdown saves state + was_playing flag
     {

@@ -55,13 +55,13 @@ pub async fn start_audio_server(
 
 async fn serve_audio(
     State(state): State<AudioServerState>,
-    Path(track_id): Path<u64>,
+    Path(track_id): Path<String>,
     Query(query): Query<AudioQuery>,
 ) -> impl IntoResponse {
     let quality = query.quality.as_deref().unwrap_or("LOSSLESS");
 
     // Fast path: serve from local download cache
-    if let Ok(Some(path)) = state.storage.get_download_path(track_id).await {
+    if let Ok(Some(path)) = state.storage.get_download_path(&track_id).await {
         let p = std::path::Path::new(&path);
         if p.exists() {
             match tokio::fs::read(p).await {
@@ -89,7 +89,7 @@ async fn serve_audio(
     // Slow path: resolve manifest and proxy CDN bytes
     let manifest = match tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        state.client.stream_manifest(track_id, quality),
+        state.client.stream_manifest(&track_id, quality),
     )
     .await
     {

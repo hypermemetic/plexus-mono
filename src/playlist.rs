@@ -1,6 +1,6 @@
-//! PlaylistHub — persistent playlist management for plexus-mono
+//! PlaylistHub — persistent playlist management for plexus-music
 //!
-//! Stores playlists as JSON files under `~/.plexus/monochrome/player/playlists/`.
+//! Stores playlists as JSON files under a configurable data directory.
 //! Registered as a child activation of MonoHub via ChildRouter.
 
 use async_stream::stream;
@@ -39,10 +39,7 @@ pub struct PlaylistHub {
 }
 
 impl PlaylistHub {
-    pub fn new(player: Arc<Player>, client: Arc<dyn MusicProvider>) -> Self {
-        let data_dir = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".plexus/monochrome/player/playlists");
+    pub fn new(player: Arc<Player>, client: Arc<dyn MusicProvider>, data_dir: PathBuf) -> Self {
         Self {
             player,
             client,
@@ -134,7 +131,7 @@ impl PlaylistHub {
         &self,
         name: String,
         description: Option<String>,
-        ids: Option<Vec<u64>>,
+        ids: Option<Vec<String>>,
         quality: Option<String>,
     ) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let hub = self.clone();
@@ -146,17 +143,18 @@ impl PlaylistHub {
             }
             let tracks = if let Some(ids) = ids {
                 // Resolve all track metadata in parallel
-                let futs: Vec<_> = ids.iter().map(|&id| {
+                let futs: Vec<_> = ids.iter().map(|id| {
                     let client = hub.client.clone();
                     let q = quality.clone();
+                    let id = id.clone();
                     async move {
-                        let info = client.track_info(id).await.ok();
+                        let info = client.track_info(&id).await.ok();
                         match info {
                             Some(MonoEvent::Track { title, artist, album, duration_secs, cover_id, .. }) => {
                                 QueuedTrack { id, title, artist, album, duration_secs, quality: q, cover_id, source: None }
                             }
                             _ => QueuedTrack {
-                                id, title: format!("Track {id}"), artist: String::new(),
+                                id: id.clone(), title: format!("Track {id}"), artist: String::new(),
                                 album: String::new(), duration_secs: 0, quality: q, cover_id: None, source: None,
                             },
                         }
@@ -343,7 +341,7 @@ impl PlaylistHub {
     pub async fn add(
         &self,
         name: String,
-        id: u64,
+        id: String,
         quality: Option<String>,
     ) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let hub = self.clone();
@@ -358,13 +356,13 @@ impl PlaylistHub {
                 Err(e) => { yield MonoEvent::Error { message: e }; return; }
             };
             // Fetch track metadata
-            let track_info = hub.client.track_info(id).await.ok();
+            let track_info = hub.client.track_info(&id).await.ok();
             let queued = match track_info {
                 Some(MonoEvent::Track { title, artist, album, duration_secs, cover_id, .. }) => {
                     QueuedTrack { id, title, artist, album, duration_secs, quality, cover_id, source: None }
                 }
                 _ => QueuedTrack {
-                    id,
+                    id: id.clone(),
                     title: format!("Track {id}"),
                     artist: String::new(),
                     album: String::new(),
@@ -522,7 +520,7 @@ impl PlaylistHub {
             hub.player.stop().await;
             hub.player.queue_clear().await;
             for track in &data.tracks {
-                match hub.player.queue_add_with_source(track.id, &track.quality, Some(name.clone())).await {
+                match hub.player.queue_add_with_source(&track.id, &track.quality, Some(name.clone())).await {
                     Ok(()) => {}
                     Err(e) => {
                         yield MonoEvent::Error { message: e };

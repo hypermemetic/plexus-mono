@@ -12,6 +12,8 @@ use plexus_core::plexus::schema::ChildSummary;
 use plexus_core::plexus::{ChildRouter, PlexusError, PlexusStream};
 use plexus_core::Activation;
 
+use std::path::PathBuf;
+
 use crate::player::Player;
 use crate::playlist::PlaylistHub;
 use crate::provider::MusicProvider;
@@ -27,9 +29,16 @@ pub struct PlayerHub {
 
 impl PlayerHub {
     /// Create a new PlayerHub from a shared music provider.
-    pub async fn new(client: Arc<dyn MusicProvider>, storage: Arc<MonoStorage>) -> Self {
-        let player = Player::new(client.clone(), storage).await;
-        let playlist = PlaylistHub::new(player.clone(), client);
+    pub async fn new(
+        client: Arc<dyn MusicProvider>,
+        storage: Arc<MonoStorage>,
+        data_dir: PathBuf,
+        track_url_template: Option<String>,
+    ) -> Self {
+        let player = Player::new(client.clone(), storage, data_dir.clone(), track_url_template)
+            .await;
+        let playlist_dir = data_dir.join("player/playlists");
+        let playlist = PlaylistHub::new(player.clone(), client, playlist_dir);
         Self { player, playlist }
     }
 
@@ -90,13 +99,13 @@ impl PlayerHub {
     )]
     pub async fn play(
         &self,
-        id: u64,
+        id: String,
         quality: Option<String>,
     ) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let player = self.player.clone();
         let quality = quality.unwrap_or_else(|| "LOSSLESS".to_string());
         stream! {
-            match player.play_track(id, &quality).await {
+            match player.play_track(&id, &quality).await {
                 Ok(()) => yield MonoEvent::PlayerAck {
                     action: "play".to_string(),
                     message: format!("playing track {id}"),
@@ -218,13 +227,13 @@ impl PlayerHub {
     )]
     pub async fn queue_album(
         &self,
-        id: u64,
+        id: String,
         quality: Option<String>,
     ) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let player = self.player.clone();
         let quality = quality.unwrap_or_else(|| "LOSSLESS".to_string());
         stream! {
-            match player.queue_album(id, &quality).await {
+            match player.queue_album(&id, &quality).await {
                 Ok(tracks) => {
                     let count = tracks.len();
                     yield MonoEvent::PlayerAck {
@@ -253,14 +262,14 @@ impl PlayerHub {
     )]
     pub async fn queue_add(
         &self,
-        id: u64,
+        id: String,
         quality: Option<String>,
         source: Option<String>,
     ) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let player = self.player.clone();
         let quality = quality.unwrap_or_else(|| "LOSSLESS".to_string());
         stream! {
-            match player.queue_add_with_source(id, &quality, source).await {
+            match player.queue_add_with_source(&id, &quality, source).await {
                 Ok(()) => yield MonoEvent::PlayerAck {
                     action: "queue_add".to_string(),
                     message: format!("track {id} added to queue"),
@@ -281,14 +290,14 @@ impl PlayerHub {
     )]
     pub async fn queue_add_next(
         &self,
-        id: u64,
+        id: String,
         quality: Option<String>,
         source: Option<String>,
     ) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let player = self.player.clone();
         let quality = quality.unwrap_or_else(|| "LOSSLESS".to_string());
         stream! {
-            match player.queue_add_next(id, &quality, source).await {
+            match player.queue_add_next(&id, &quality, source).await {
                 Ok(()) => yield MonoEvent::PlayerAck {
                     action: "queue_add_next".to_string(),
                     message: format!("track {id} added as play next"),
@@ -309,7 +318,7 @@ impl PlayerHub {
     )]
     pub async fn queue_batch(
         &self,
-        ids: Vec<u64>,
+        ids: Vec<String>,
         quality: Option<String>,
     ) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let player = self.player.clone();
@@ -358,19 +367,19 @@ impl PlayerHub {
     )]
     pub async fn shuffle_start(
         &self,
-        albums: Option<Vec<u64>>,
+        albums: Option<Vec<String>>,
         playlists: Option<Vec<String>>,
-        tracks: Option<Vec<u64>>,
+        tracks: Option<Vec<String>>,
     ) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let player = self.player.clone();
         let client = self.player.client().clone();
         let playlist_hub = self.playlist.clone();
         stream! {
-            let mut all_track_ids: Vec<u64> = Vec::new();
+            let mut all_track_ids: Vec<String> = Vec::new();
 
             // Resolve albums → track IDs
             if let Some(album_ids) = albums {
-                for album_id in album_ids {
+                for album_id in &album_ids {
                     match client.album(album_id).await {
                         Ok((_album, track_events)) => {
                             for event in track_events {
@@ -392,7 +401,7 @@ impl PlayerHub {
                     match playlist_hub.load_playlist_tracks(&name) {
                         Some(tracks) => {
                             for t in tracks {
-                                all_track_ids.push(t.id);
+                                all_track_ids.push(t.id.clone());
                             }
                         }
                         None => {
@@ -612,10 +621,10 @@ impl PlayerHub {
         description = "Get per-track listening statistics (play count, skip count, total listen time)",
         params(id = "Track ID")
     )]
-    pub async fn stats(&self, id: u64) -> impl Stream<Item = MonoEvent> + Send + 'static {
+    pub async fn stats(&self, id: String) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let player = self.player.clone();
         stream! {
-            match player.get_track_stats(id).await {
+            match player.get_track_stats(&id).await {
                 Some(s) => yield MonoEvent::TrackStats {
                     id: s.id,
                     title: s.title,
@@ -733,12 +742,12 @@ impl PlayerHub {
     )]
     pub async fn like(
         &self,
-        id: u64,
+        id: String,
         source: Option<String>,
     ) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let player = self.player.clone();
         stream! {
-            match player.toggle_like(id, source).await {
+            match player.toggle_like(&id, source).await {
                 Ok(liked) => yield MonoEvent::PlayerAck {
                     action: "like".to_string(),
                     message: if liked { format!("liked track {id}") } else { format!("unliked track {id}") },
@@ -757,9 +766,9 @@ impl PlayerHub {
         stream! {
             match player.liked_ids().await {
                 Ok(ids) => {
-                    let tracks: Vec<crate::types::QueuedTrack> = ids.iter().map(|&id| {
+                    let tracks: Vec<crate::types::QueuedTrack> = ids.iter().map(|id| {
                         crate::types::QueuedTrack {
-                            id,
+                            id: id.clone(),
                             title: String::new(),
                             artist: String::new(),
                             album: String::new(),
@@ -790,7 +799,7 @@ impl PlayerHub {
     )]
     pub async fn download_track(
         &self,
-        id: Option<u64>,
+        id: Option<String>,
         quality: Option<String>,
     ) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let player = self.player.clone();
@@ -804,7 +813,7 @@ impl PlayerHub {
                     return;
                 }
             };
-            match player.download_track(track_id, &quality).await {
+            match player.download_track(&track_id, &quality).await {
                 Ok(mut rx) => {
                     while let Some(event) = rx.recv().await {
                         yield event;
@@ -822,7 +831,7 @@ impl PlayerHub {
     )]
     pub async fn delete_download(
         &self,
-        id: Option<u64>,
+        id: Option<String>,
     ) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let player = self.player.clone();
         stream! {
@@ -833,7 +842,7 @@ impl PlayerHub {
                     return;
                 }
             };
-            match player.delete_download(track_id).await {
+            match player.delete_download(&track_id).await {
                 Ok(path) => yield MonoEvent::PlayerAck {
                     action: "delete_download".to_string(),
                     message: match path {

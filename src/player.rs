@@ -40,20 +40,18 @@ fn default_preamp() -> f32 {
 }
 
 impl PlayerState {
-    fn state_path() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".plexus/monochrome/player/state.json")
+    fn state_path(data_dir: &std::path::Path) -> PathBuf {
+        data_dir.join("player/state.json")
     }
 
-    pub fn load() -> Option<Self> {
-        let path = Self::state_path();
+    pub fn load(data_dir: &std::path::Path) -> Option<Self> {
+        let path = Self::state_path(data_dir);
         let data = std::fs::read_to_string(&path).ok()?;
         serde_json::from_str(&data).ok()
     }
 
-    pub fn save(&self) {
-        let path = Self::state_path();
+    pub fn save(&self, data_dir: &std::path::Path) {
+        let path = Self::state_path(data_dir);
         if let Some(parent) = path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 tracing::warn!("failed to create directory {}: {e}", parent.display());
@@ -69,35 +67,32 @@ impl PlayerState {
 
 /// Persistent store for per-track stats and listen log
 pub struct StatsStore {
-    stats: HashMap<u64, TrackStats>,
+    stats: HashMap<String, TrackStats>,
     listen_log: Vec<ListenEvent>,
+    data_dir: PathBuf,
 }
 
 impl StatsStore {
-    fn stats_path() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".plexus/monochrome/player/stats.json")
+    fn stats_path(data_dir: &std::path::Path) -> PathBuf {
+        data_dir.join("player/stats.json")
     }
 
-    fn log_path() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".plexus/monochrome/player/listen_log.json")
+    fn log_path(data_dir: &std::path::Path) -> PathBuf {
+        data_dir.join("player/listen_log.json")
     }
 
-    pub fn load() -> Self {
-        let stats: HashMap<u64, TrackStats> = Self::stats_path()
+    pub fn load(data_dir: PathBuf) -> Self {
+        let stats: HashMap<String, TrackStats> = Self::stats_path(&data_dir)
             .pipe(|p| std::fs::read_to_string(p).ok())
             .and_then(|d| serde_json::from_str(&d).ok())
             .unwrap_or_default();
 
-        let listen_log: Vec<ListenEvent> = Self::log_path()
+        let listen_log: Vec<ListenEvent> = Self::log_path(&data_dir)
             .pipe(|p| std::fs::read_to_string(p).ok())
             .and_then(|d| serde_json::from_str(&d).ok())
             .unwrap_or_default();
 
-        Self { stats, listen_log }
+        Self { stats, listen_log, data_dir }
     }
 
     fn save(&self) {
@@ -112,18 +107,18 @@ impl StatsStore {
             }
         }
         if let Ok(json) = serde_json::to_string_pretty(&self.stats) {
-            save_json(&Self::stats_path(), &json);
+            save_json(&Self::stats_path(&self.data_dir), &json);
         }
         if let Ok(json) = serde_json::to_string_pretty(&self.listen_log) {
-            save_json(&Self::log_path(), &json);
+            save_json(&Self::log_path(&self.data_dir), &json);
         }
     }
 
     /// Record that a track started playing. Returns the ISO 8601 timestamp.
     pub fn record_start(&mut self, track: &QueuedTrack) -> String {
         let now = Utc::now().to_rfc3339();
-        let entry = self.stats.entry(track.id).or_insert_with(|| TrackStats {
-            id: track.id,
+        let entry = self.stats.entry(track.id.clone()).or_insert_with(|| TrackStats {
+            id: track.id.clone(),
             title: track.title.clone(),
             artist: track.artist.clone(),
             album: track.album.clone(),
@@ -147,13 +142,13 @@ impl StatsStore {
     /// Record that a track ended (complete, skip, or stop)
     pub fn record_end(
         &mut self,
-        track_id: u64,
+        track_id: &str,
         started_at: &str,
         duration_listened: f32,
         outcome: ListenOutcome,
     ) {
         // Update aggregate stats
-        if let Some(entry) = self.stats.get_mut(&track_id) {
+        if let Some(entry) = self.stats.get_mut(track_id) {
             entry.total_listen_secs += duration_listened;
             match &outcome {
                 ListenOutcome::Complete => entry.complete_count += 1,
@@ -164,7 +159,7 @@ impl StatsStore {
 
         // Append to listen log
         self.listen_log.push(ListenEvent {
-            track_id,
+            track_id: track_id.to_string(),
             started_at: started_at.to_string(),
             duration_listened,
             outcome,
@@ -264,7 +259,7 @@ impl<S: rodio::Source<Item = f32>> rodio::Source for LevelMonitor<S> {
 /// Snapshot of current playback state, broadcast via watch channel
 #[derive(Debug, Clone)]
 pub struct NowPlaying {
-    pub track_id: Option<u64>,
+    pub track_id: Option<String>,
     pub title: Option<String>,
     pub artist: Option<String>,
     pub album: Option<String>,
@@ -303,8 +298,8 @@ impl Default for NowPlaying {
 
 /// Shuffle radio mode — randomly picks tracks from a source pool
 struct ShufflePool {
-    track_pool: Vec<u64>,
-    played: HashSet<u64>,
+    track_pool: Vec<String>,
+    played: HashSet<String>,
     active: bool,
 }
 
@@ -317,12 +312,12 @@ impl ShufflePool {
         }
     }
 
-    fn pick_next(&mut self) -> Option<u64> {
-        let available: Vec<u64> = self
+    fn pick_next(&mut self) -> Option<String> {
+        let available: Vec<String> = self
             .track_pool
             .iter()
-            .copied()
-            .filter(|id| !self.played.contains(id))
+            .filter(|id| !self.played.contains(*id))
+            .cloned()
             .collect();
         if available.is_empty() {
             // All played — reset and re-pick
@@ -331,13 +326,13 @@ impl ShufflePool {
                 return None;
             }
             let idx = rand::random_range(0..self.track_pool.len());
-            let id = self.track_pool[idx];
-            self.played.insert(id);
+            let id = self.track_pool[idx].clone();
+            self.played.insert(id.clone());
             Some(id)
         } else {
             let idx = rand::random_range(0..available.len());
-            let id = available[idx];
-            self.played.insert(id);
+            let id = available[idx].clone();
+            self.played.insert(id.clone());
             Some(id)
         }
     }
@@ -353,7 +348,7 @@ struct PlayerInner {
     /// Pre-buffered audio readers keyed by track ID.
     /// Each entry is a StreamDownload that's already connected and downloading.
     /// Dropped automatically when removed (temp file cleaned up via RAII).
-    prefetched: HashMap<u64, (Box<dyn ReadSeekSend>, Option<u64>)>,
+    prefetched: HashMap<String, (Box<dyn ReadSeekSend>, Option<u64>)>,
     /// Timestamp when current track started playing (ISO 8601)
     listen_started_at: Option<String>,
     /// Shuffle radio mode state
@@ -364,7 +359,7 @@ struct PlayerInner {
 struct PeakHistory {
     buffer: Vec<f32>,
     capacity: usize,
-    track_id: Option<u64>,
+    track_id: Option<String>,
 }
 
 impl PeakHistory {
@@ -376,7 +371,7 @@ impl PeakHistory {
         }
     }
 
-    fn push(&mut self, peak: f32, track_id: Option<u64>) {
+    fn push(&mut self, peak: f32, track_id: Option<String>) {
         if track_id != self.track_id {
             self.buffer.clear();
             self.track_id = track_id;
@@ -387,8 +382,8 @@ impl PeakHistory {
         self.buffer.push(peak);
     }
 
-    fn snapshot(&self) -> (Option<u64>, Vec<f32>) {
-        (self.track_id, self.buffer.clone())
+    fn snapshot(&self) -> (Option<String>, Vec<f32>) {
+        (self.track_id.clone(), self.buffer.clone())
     }
 }
 
@@ -403,6 +398,10 @@ pub struct Player {
     client: Arc<dyn MusicProvider>,
     audio_peak: Arc<AtomicU32>,
     peak_history: Arc<Mutex<PeakHistory>>,
+    /// Base directory for persistent data (state, stats, playlists)
+    data_dir: PathBuf,
+    /// Optional URL template for track links (e.g. "https://example.com/track/t/{}")
+    track_url_template: Option<String>,
     // Dropping this signals the audio thread to exit
     _shutdown_tx: std::sync::mpsc::Sender<()>,
 }
@@ -410,7 +409,12 @@ pub struct Player {
 impl Player {
     /// Create a new Player. Spawns a dedicated audio thread and background watchers.
     #[allow(clippy::too_many_lines)]
-    pub async fn new(client: Arc<dyn MusicProvider>, storage: Arc<MonoStorage>) -> Arc<Self> {
+    pub async fn new(
+        client: Arc<dyn MusicProvider>,
+        storage: Arc<MonoStorage>,
+        data_dir: PathBuf,
+        track_url_template: Option<String>,
+    ) -> Arc<Self> {
         let (sink_tx, sink_rx) = std::sync::mpsc::channel();
         let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
 
@@ -447,13 +451,15 @@ impl Player {
                 listen_started_at: None,
                 shuffle: ShufflePool::new(),
             }),
-            stats: Mutex::new(StatsStore::load()),
+            stats: Mutex::new(StatsStore::load(data_dir.clone())),
             storage,
             now_playing_tx,
             now_playing_rx,
             client,
             audio_peak: Arc::new(AtomicU32::new(0)),
             peak_history: Arc::new(Mutex::new(PeakHistory::new(2048))),
+            data_dir,
+            track_url_template,
             _shutdown_tx: shutdown_tx,
         });
 
@@ -467,7 +473,7 @@ impl Player {
                 let peak = f32::from_bits(bits);
                 let track_id = {
                     let inner = this.inner.lock().await;
-                    inner.current_track.as_ref().map(|t| t.id)
+                    inner.current_track.as_ref().map(|t| t.id.clone())
                 };
                 let mut hist = this.peak_history.lock().await;
                 hist.push(peak, track_id);
@@ -508,7 +514,7 @@ impl Player {
                         let listen_info = inner
                             .current_track
                             .as_ref()
-                            .map(|t| (t.id, t.duration_secs as f32));
+                            .map(|t| (t.id.clone(), t.duration_secs as f32));
                         let started_at = inner.listen_started_at.take();
                         if let (Some((track_id, duration)), Some(started_at)) =
                             (listen_info, started_at)
@@ -516,7 +522,7 @@ impl Player {
                             drop(inner);
                             let mut stats = this.stats.lock().await;
                             stats.record_end(
-                                track_id,
+                                &track_id,
                                 &started_at,
                                 duration,
                                 ListenOutcome::Complete,
@@ -551,7 +557,7 @@ impl Player {
         // Prefetch watcher — pre-buffers queued tracks when playing
         let weak = Arc::downgrade(&player);
         tokio::spawn(async move {
-            let mut last_track_id: Option<u64> = None;
+            let mut last_track_id: Option<String> = None;
             loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 let Some(this) = weak.upgrade() else { break };
@@ -560,7 +566,7 @@ impl Player {
                     if !matches!(inner.status, PlayStatus::Playing) {
                         continue;
                     }
-                    inner.current_track.as_ref().map(|t| t.id)
+                    inner.current_track.as_ref().map(|t| t.id.clone())
                 };
                 // Prefetch when track changes or on first play
                 if current_id != last_track_id {
@@ -760,7 +766,7 @@ impl Player {
         ) = {
             let inner = self.inner.lock().await;
             (
-                inner.current_track.as_ref().map(|t| t.id),
+                inner.current_track.as_ref().map(|t| t.id.clone()),
                 inner.current_track.as_ref().map(|t| t.title.clone()),
                 inner.current_track.as_ref().map(|t| t.artist.clone()),
                 inner.current_track.as_ref().map(|t| t.album.clone()),
@@ -772,14 +778,17 @@ impl Player {
                 inner.volume,
                 inner.preamp,
                 inner.queue.len(),
-                inner
-                    .current_track
-                    .as_ref()
-                    .map(|t| format!("https://monochrome.tf/track/t/{}", t.id)),
+                {
+                    let track_id = inner.current_track.as_ref().map(|t| t.id.clone());
+                    match (&self.track_url_template, track_id) {
+                        (Some(tpl), Some(id)) => Some(tpl.replace("{}", &id)),
+                        _ => None,
+                    }
+                },
             )
         };
         // Storage I/O outside the lock — no mutex contention
-        let (is_liked, is_downloaded) = if let Some(id) = track_id {
+        let (is_liked, is_downloaded) = if let Some(ref id) = track_id {
             let liked = self.storage.is_liked(id).await.unwrap_or(false);
             let downloaded = self.storage.is_downloaded(id).await.unwrap_or(false);
             (Some(liked), Some(downloaded))
@@ -813,13 +822,13 @@ impl Player {
             let started = inner.listen_started_at.take();
             match (inner.current_track.as_ref(), started) {
                 (Some(track), Some(started_at)) => {
-                    (track.id, started_at, self.sink.get_pos().as_secs_f32())
+                    (track.id.clone(), started_at, self.sink.get_pos().as_secs_f32())
                 }
                 _ => return,
             }
         };
         let mut stats = self.stats.lock().await;
-        stats.record_end(track_id, &started_at, position, outcome);
+        stats.record_end(&track_id, &started_at, position, outcome);
     }
 
     /// Resolve stream URL, create decoder, and start playback on the sink.
@@ -842,7 +851,7 @@ impl Player {
         // Priority: prefetch cache → local download → HTTP stream
         let audio_result: Result<(Box<dyn ReadSeekSend>, Option<u64>), String> = {
             let mut inner = self.inner.lock().await;
-            if let Some((r, cl)) = inner.prefetched.remove(&track.id) {
+            if let Some((r, cl)) = inner.prefetched.remove(&track.id as &str) {
                 tracing::debug!("using prefetched audio for track {}", track.id);
                 Ok((r, cl))
             } else {
@@ -917,7 +926,7 @@ impl Player {
         track: &QueuedTrack,
     ) -> Result<(Box<dyn ReadSeekSend>, Option<u64>), String> {
         // Check download registry for offline playback
-        if let Ok(Some(path)) = self.storage.get_download_path(track.id).await {
+        if let Ok(Some(path)) = self.storage.get_download_path(&track.id).await {
             let p = std::path::Path::new(&path);
             if p.exists() {
                 if let Ok(file) = std::fs::File::open(p) {
@@ -930,12 +939,12 @@ impl Player {
 
         // Resolve CDN URL (with timeout to avoid hanging on expired sessions)
         let manifest = tokio::time::timeout(
-            Duration::from_secs(10),
-            self.client.stream_manifest(track.id, &track.quality),
+            Duration::from_secs(30),
+            self.client.stream_manifest(&track.id, &track.quality),
         )
         .await
         .map_err(|_| {
-            "stream manifest timed out (10s) — provider session may have expired".to_string()
+            "stream manifest timed out (30s) — provider session may have expired".to_string()
         })?
         .map_err(|e| format!("stream manifest error: {e}"))?;
         let url = match &manifest {
@@ -966,7 +975,7 @@ impl Player {
     }
 
     /// Play a track immediately, stopping whatever is currently playing.
-    pub async fn play_track(&self, id: u64, quality: &str) -> Result<(), String> {
+    pub async fn play_track(&self, id: &str, quality: &str) -> Result<(), String> {
         let track_info = self.client.track_info(id).await.ok();
         let queued = make_queued_track(id, quality, track_info);
 
@@ -1121,13 +1130,13 @@ impl Player {
     }
 
     /// Add a track to the end of the queue. Auto-starts if idle.
-    pub async fn queue_add(&self, id: u64, quality: &str) -> Result<(), String> {
+    pub async fn queue_add(&self, id: &str, quality: &str) -> Result<(), String> {
         self.queue_add_with_source(id, quality, None).await
     }
 
     pub async fn queue_add_with_source(
         &self,
-        id: u64,
+        id: &str,
         quality: &str,
         source: Option<String>,
     ) -> Result<(), String> {
@@ -1160,7 +1169,7 @@ impl Player {
     /// Add a track to the front of the queue (play next). Auto-starts if idle.
     pub async fn queue_add_next(
         &self,
-        id: u64,
+        id: &str,
         quality: &str,
         source: Option<String>,
     ) -> Result<(), String> {
@@ -1192,7 +1201,7 @@ impl Player {
     /// Add all tracks from an album to the queue. Auto-starts if idle.
     pub async fn queue_album(
         &self,
-        album_id: u64,
+        album_id: &str,
         quality: &str,
     ) -> Result<Vec<QueuedTrack>, String> {
         let (album_event, track_events) = self.client.album(album_id).await?;
@@ -1208,7 +1217,7 @@ impl Player {
             } = event
             {
                 queued_tracks.push(QueuedTrack {
-                    id: *id,
+                    id: id.clone(),
                     title: title.clone(),
                     artist: artist.clone(),
                     album: String::new(), // filled below
@@ -1267,7 +1276,7 @@ impl Player {
     /// Add multiple tracks to the queue at once. Auto-starts if idle.
     pub async fn queue_batch(
         &self,
-        ids: &[u64],
+        ids: &[String],
         quality: &str,
     ) -> Result<Vec<QueuedTrack>, String> {
         if ids.is_empty() {
@@ -1277,12 +1286,13 @@ impl Player {
         // Resolve all track metadata in parallel
         let futs: Vec<_> = ids
             .iter()
-            .map(|&id| {
+            .map(|id| {
                 let client = self.client.clone();
                 let q = quality.to_string();
+                let id = id.clone();
                 async move {
-                    let info = client.track_info(id).await.ok();
-                    make_queued_track(id, &q, info)
+                    let info = client.track_info(&id).await.ok();
+                    make_queued_track(&id, &q, info)
                 }
             })
             .collect();
@@ -1358,7 +1368,7 @@ impl Player {
             inner
                 .queue
                 .iter()
-                .filter(|t| !inner.prefetched.contains_key(&t.id))
+                .filter(|t| !inner.prefetched.contains_key(&t.id as &str))
                 .take(10)
                 .cloned()
                 .collect()
@@ -1369,7 +1379,7 @@ impl Player {
             // blocking the prefetch watcher indefinitely.
             let result = tokio::time::timeout(Duration::from_secs(30), async {
                 // Resolve manifest
-                let manifest = match self.client.stream_manifest(track.id, &track.quality).await {
+                let manifest = match self.client.stream_manifest(&track.id, &track.quality).await {
                     Ok(m) => m,
                     Err(e) => {
                         tracing::debug!("prefetch manifest failed for {}: {e}", track.id);
@@ -1415,7 +1425,7 @@ impl Player {
                 let mut inner = self.inner.lock().await;
                 inner
                     .prefetched
-                    .insert(track.id, (Box::new(reader), content_length));
+                    .insert(track.id.clone(), (Box::new(reader), content_length));
             })
             .await;
 
@@ -1436,7 +1446,7 @@ impl Player {
     }
 
     /// Get a snapshot of the buffered peak history for waveform seeding.
-    pub async fn peak_history(&self) -> (Option<u64>, Vec<f32>) {
+    pub async fn peak_history(&self) -> (Option<String>, Vec<f32>) {
         self.peak_history.lock().await.snapshot()
     }
 
@@ -1472,7 +1482,7 @@ impl Player {
         // Save state with was_playing flag so next startup auto-resumes
         let mut state = self.get_state().await;
         state.was_playing = was_playing;
-        state.save();
+        state.save(&self.data_dir);
 
         tracing::info!(
             "graceful shutdown complete (was_playing={was_playing}, pos={:.1}s)",
@@ -1483,13 +1493,13 @@ impl Player {
     /// Save current state to disk
     pub async fn save_state(&self) {
         let state = self.get_state().await;
-        state.save();
+        state.save(&self.data_dir);
     }
 
     /// Restore state from disk — resumes playback at the saved position.
     /// If `was_playing` is set (from graceful_shutdown), auto-resumes instead of pausing.
     pub async fn restore_state(&self) {
-        if let Some(state) = PlayerState::load() {
+        if let Some(state) = PlayerState::load(&self.data_dir) {
             let resume_track = state.current_track.clone();
             let resume_pos = state.position_secs;
             let auto_resume = state.was_playing;
@@ -1506,9 +1516,9 @@ impl Player {
             // Clear was_playing on disk immediately (crash safety — only intentional
             // shutdown triggers auto-resume, not a crash-loop)
             if auto_resume {
-                if let Some(mut cleared) = PlayerState::load() {
+                if let Some(mut cleared) = PlayerState::load(&self.data_dir) {
                     cleared.was_playing = false;
-                    cleared.save();
+                    cleared.save(&self.data_dir);
                 }
             }
 
@@ -1557,9 +1567,9 @@ impl Player {
     // ── Stats & Listen History queries ────────────────────────────────
 
     /// Get stats for a specific track by ID
-    pub async fn get_track_stats(&self, id: u64) -> Option<TrackStats> {
+    pub async fn get_track_stats(&self, id: &str) -> Option<TrackStats> {
         let stats = self.stats.lock().await;
-        stats.stats.get(&id).cloned()
+        stats.stats.get(id).cloned()
     }
 
     /// Get top N most-played tracks, sorted by play_count descending
@@ -1607,7 +1617,7 @@ impl Player {
     /// Toggle like on a track. Returns new liked state.
     pub async fn toggle_like(
         self: &Arc<Self>,
-        track_id: u64,
+        track_id: &str,
         source: Option<String>,
     ) -> Result<bool, String> {
         let result = self.storage.toggle_like(track_id, source).await?;
@@ -1617,7 +1627,7 @@ impl Player {
         Ok(result)
     }
 
-    /// Sync liked tracks to ~/.plexus/monochrome/player/playlists/Liked.json
+    /// Sync liked tracks to {data_dir}/player/playlists/Liked.json
     async fn sync_liked_playlist(&self) {
         let liked = match self.storage.liked_ids_with_source().await {
             Ok(ids) => ids,
@@ -1627,9 +1637,7 @@ impl Player {
             }
         };
 
-        let playlist_path = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".plexus/monochrome/player/playlists/Liked.json");
+        let playlist_path = self.data_dir.join("player/playlists/Liked.json");
 
         if liked.is_empty() {
             let _ = std::fs::remove_file(&playlist_path);
@@ -1637,10 +1645,10 @@ impl Player {
         }
 
         // Load existing Liked.json to reuse cached metadata
-        let existing: HashMap<u64, QueuedTrack> = std::fs::read_to_string(&playlist_path)
+        let existing: HashMap<String, QueuedTrack> = std::fs::read_to_string(&playlist_path)
             .ok()
             .and_then(|s| serde_json::from_str::<PlaylistData>(&s).ok())
-            .map(|p| p.tracks.into_iter().map(|t| (t.id, t)).collect())
+            .map(|p| p.tracks.into_iter().map(|t| { let id = t.id.clone(); (id, t) }).collect())
             .unwrap_or_default();
 
         let mut tracks = Vec::with_capacity(liked.len());
@@ -1650,7 +1658,7 @@ impl Player {
                 tracks.push(cached);
             } else {
                 // Fetch metadata for new likes
-                let info = self.client.track_info(*id).await.ok();
+                let info = self.client.track_info(id).await.ok();
                 let queued = match info {
                     Some(MonoEvent::Track {
                         title,
@@ -1660,7 +1668,7 @@ impl Player {
                         cover_id,
                         ..
                     }) => QueuedTrack {
-                        id: *id,
+                        id: id.clone(),
                         title,
                         artist,
                         album,
@@ -1670,7 +1678,7 @@ impl Player {
                         source: source.clone(),
                     },
                     _ => QueuedTrack {
-                        id: *id,
+                        id: id.clone(),
                         title: format!("Track {id}"),
                         artist: String::new(),
                         album: String::new(),
@@ -1706,14 +1714,14 @@ impl Player {
     }
 
     /// Get all liked track IDs
-    pub async fn liked_ids(&self) -> Result<Vec<u64>, String> {
+    pub async fn liked_ids(&self) -> Result<Vec<String>, String> {
         self.storage.liked_ids().await
     }
 
     /// Download a track, register in storage, stream progress events via channel
     pub async fn download_track(
         self: &Arc<Self>,
-        id: u64,
+        id: &str,
         quality: &str,
     ) -> Result<tokio::sync::mpsc::Receiver<MonoEvent>, String> {
         // Get track info for organized path
@@ -1734,6 +1742,7 @@ impl Player {
 
         // Get stream manifest for extension
         let manifest = self.client.stream_manifest(id, quality).await?;
+        let id = id.to_string();
         let ext = match &manifest {
             MonoEvent::StreamManifest { extension, .. } => extension.clone(),
             _ => "flac".to_string(),
@@ -1750,7 +1759,7 @@ impl Player {
         let path_str = path.to_string_lossy().to_string();
 
         // Start download — returns a channel of progress events
-        let mut inner_rx = self.client.download(id, quality, &path_str).await?;
+        let mut inner_rx = self.client.download(&id, quality, &path_str).await?;
 
         // Wrap in a new channel so we can register + broadcast after completion
         let (tx, rx) = tokio::sync::mpsc::channel::<MonoEvent>(16);
@@ -1770,7 +1779,7 @@ impl Player {
                     let _ = player
                         .storage
                         .register_download(
-                            id,
+                            &id,
                             &path_str,
                             Some(&title_c),
                             Some(&artist_c),
@@ -1788,7 +1797,7 @@ impl Player {
     }
 
     /// Delete a downloaded track from local storage
-    pub async fn delete_download(&self, track_id: u64) -> Result<Option<String>, String> {
+    pub async fn delete_download(&self, track_id: &str) -> Result<Option<String>, String> {
         let path = self.storage.delete_download(track_id).await?;
         self.broadcast_now_playing().await;
         Ok(path)
@@ -1804,7 +1813,7 @@ impl Player {
 
     /// Start shuffle mode from a pool of track IDs. Clears the queue, picks
     /// a first track and queues 1-2 upcoming.
-    pub async fn shuffle_start(&self, track_ids: Vec<u64>) -> Result<(), String> {
+    pub async fn shuffle_start(&self, track_ids: Vec<String>) -> Result<(), String> {
         if track_ids.is_empty() {
             return Err("no tracks in shuffle pool".to_string());
         }
@@ -1822,7 +1831,7 @@ impl Player {
             let mut inner = self.inner.lock().await;
             inner.shuffle.pick_next()
         };
-        if let Some(id) = first_id {
+        if let Some(ref id) = first_id {
             let _ = self.queue_add(id, "LOSSLESS").await;
         }
 
@@ -1841,7 +1850,7 @@ impl Player {
 
     /// Refill the queue to have 1-2 upcoming tracks from the shuffle pool.
     async fn shuffle_refill(&self) {
-        let ids_to_add: Vec<u64> = {
+        let ids_to_add: Vec<String> = {
             let mut inner = self.inner.lock().await;
             if !inner.shuffle.active {
                 return;
@@ -1858,7 +1867,7 @@ impl Player {
             ids
         };
 
-        for id in ids_to_add {
+        for id in &ids_to_add {
             let _ = self.queue_add(id, "LOSSLESS").await;
         }
     }
@@ -1881,7 +1890,7 @@ impl Player {
 }
 
 /// Build a QueuedTrack from track info (or fallback to minimal metadata)
-fn make_queued_track(id: u64, quality: &str, info: Option<MonoEvent>) -> QueuedTrack {
+fn make_queued_track(id: &str, quality: &str, info: Option<MonoEvent>) -> QueuedTrack {
     match info {
         Some(MonoEvent::Track {
             title,
@@ -1891,7 +1900,7 @@ fn make_queued_track(id: u64, quality: &str, info: Option<MonoEvent>) -> QueuedT
             cover_id,
             ..
         }) => QueuedTrack {
-            id,
+            id: id.to_string(),
             title,
             artist,
             album,
@@ -1901,7 +1910,7 @@ fn make_queued_track(id: u64, quality: &str, info: Option<MonoEvent>) -> QueuedT
             source: None,
         },
         _ => QueuedTrack {
-            id,
+            id: id.to_string(),
             title: format!("Track {id}"),
             artist: String::new(),
             album: String::new(),

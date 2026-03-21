@@ -172,6 +172,11 @@ body {
   transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+/* Now-playing must not scroll — cap its height */
+#view-now-playing {
+  overflow: hidden;
+}
+
 #view-container[data-view="now-playing"] { transform: translateX(0); }
 #view-container[data-view="browse"]      { transform: translateX(calc(-100% - 24px)); }
 #view-container[data-view="detail"]      { transform: translateX(calc(-200% - 48px)); }
@@ -791,6 +796,7 @@ body {
 /* Research results view */
 #view-container[data-view="research"] { transform: translateX(calc(-400% - 96px)); }
 #view-container[data-view="history"]  { transform: translateX(calc(-500% - 120px)); }
+#view-container[data-view="settings"] { transform: translateX(calc(-600% - 144px)); }
 
 #research-header {
   padding: 0 2px;
@@ -983,6 +989,37 @@ body {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
+}
+
+/* Provider settings */
+.settings-conn-info {
+  padding: 12px 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 8px;
+}
+
+.settings-conn-info strong {
+  color: var(--text-primary);
+}
+
+.settings-url {
+  font-family: monospace;
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+.settings-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  opacity: 0.6;
+}
+
+#view-settings .list-row.active {
+  border-left: 2px solid var(--accent);
+  padding-left: 4px;
 }
 
 /* Save queue button in queue view */

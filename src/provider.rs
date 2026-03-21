@@ -13,12 +13,12 @@ use crate::types::{MusicEvent, SearchKind};
 #[async_trait]
 pub trait MusicStreaming: Send + Sync + 'static {
     /// Resolve a stream manifest (pre-signed CDN URL) for a track.
-    async fn stream_manifest(&self, id: u64, quality: &str) -> Result<MusicEvent, String>;
+    async fn stream_manifest(&self, id: &str, quality: &str) -> Result<MusicEvent, String>;
 
     /// Download a track to a local file, streaming progress events.
     async fn download(
         &self,
-        id: u64,
+        id: &str,
         quality: &str,
         path: &str,
     ) -> Result<tokio::sync::mpsc::Receiver<MusicEvent>, String>;
@@ -28,13 +28,13 @@ pub trait MusicStreaming: Send + Sync + 'static {
 #[async_trait]
 pub trait MusicMetadata: Send + Sync + 'static {
     /// Fetch track metadata by ID.
-    async fn track_info(&self, id: u64) -> Result<MusicEvent, String>;
+    async fn track_info(&self, id: &str) -> Result<MusicEvent, String>;
 
     /// Fetch album metadata and its track listing.
-    async fn album(&self, id: u64) -> Result<(MusicEvent, Vec<MusicEvent>), String>;
+    async fn album(&self, id: &str) -> Result<(MusicEvent, Vec<MusicEvent>), String>;
 
     /// Fetch artist information by ID.
-    async fn artist(&self, id: u64) -> Result<MusicEvent, String>;
+    async fn artist(&self, id: &str) -> Result<MusicEvent, String>;
 }
 
 /// Search across tracks, albums, and artists.
@@ -54,17 +54,17 @@ pub trait MusicSearch: Send + Sync + 'static {
 #[async_trait]
 pub trait MusicLyrics: Send + Sync + 'static {
     /// Fetch lyrics for a track (synced if available).
-    async fn lyrics(&self, id: u64) -> Result<Vec<MusicEvent>, String>;
+    async fn lyrics(&self, id: &str) -> Result<Vec<MusicEvent>, String>;
 }
 
 /// Enrichment data: cover art and recommendations.
 #[async_trait]
 pub trait MusicEnrichment: Send + Sync + 'static {
     /// Fetch cover art URLs for a track/album.
-    async fn cover(&self, id: u64, size: u32) -> Result<Vec<MusicEvent>, String>;
+    async fn cover(&self, id: &str, size: u32) -> Result<Vec<MusicEvent>, String>;
 
     /// Fetch recommended tracks similar to a given track.
-    async fn recommendations(&self, id: u64) -> Result<Vec<MusicEvent>, String>;
+    async fn recommendations(&self, id: &str) -> Result<Vec<MusicEvent>, String>;
 }
 
 /// Blanket trait for providers that implement all capabilities.

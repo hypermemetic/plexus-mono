@@ -99,11 +99,11 @@ test.describe('Mono Tray Screenshots', () => {
     await page.click('#nav-action');
     await page.locator('#browse-list .list-row').first().waitFor({ timeout: 10000 });
 
-    // Type search query
+    // Type search query (generic term that works with any provider)
     await page.click('#search-input');
-    await page.keyboard.type('radiohead', { delay: 50 });
-    // Wait for actual search results — a row containing "Radiohead" (case-insensitive)
-    await page.locator('#browse-list .list-row .list-row-sub').filter({ hasText: /radiohead/i }).first().waitFor({ timeout: 30000 });
+    await page.keyboard.type('jazz', { delay: 50 });
+    // Wait for actual search results
+    await page.locator('#browse-list .list-row .list-row-sub').first().waitFor({ timeout: 30000 });
     // Ensure multiple results rendered
     await expect(page.locator('#browse-list .list-row')).not.toHaveCount(0);
     await page.waitForTimeout(500);
