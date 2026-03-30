@@ -5746,11 +5746,11 @@ dependencies = [
 
 [[patch.unused]]
 name = "plexus-core"
-version = "0.3.13"
+version = "0.4.0"
 
 [[patch.unused]]
 name = "plexus-macros"
-version = "0.3.10"
+version = "0.4.0"
 
 [[patch.unused]]
 name = "plexus-transport"

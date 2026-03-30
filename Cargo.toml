@@ -17,8 +17,8 @@ path = "src/lib.rs"
 
 [dependencies]
 # Plexus RPC framework
-plexus-core = "0.3.0"
-plexus-macros = "0.3.0"
+plexus-core = "0.4.0"
+plexus-macros = "0.4.0"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

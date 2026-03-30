@@ -2004,7 +2004,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "plexus-core"
-version = "0.3.13"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2039,7 +2039,7 @@ dependencies = [
 
 [[package]]
 name = "plexus-macros"
-version = "0.3.10"
+version = "0.4.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2060,7 +2060,7 @@ dependencies = [
  "futures",
  "jsonrpsee",
  "plexus-core",
- "plexus-macros 0.3.10",
+ "plexus-macros 0.4.0",
  "plexus-transport",
  "rand 0.9.2",
  "reqwest",
