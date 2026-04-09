@@ -109,7 +109,7 @@ impl PlaylistHub {
 }
 
 #[allow(clippy::unused_async)]
-#[plexus_macros::hub_methods(
+#[plexus_macros::activation(
     namespace = "playlist",
     version = "0.1.0",
     description = "Persistent playlist management — save, load, and play named track lists",
@@ -117,7 +117,7 @@ impl PlaylistHub {
 )]
 impl PlaylistHub {
     /// Create an empty or pre-populated playlist
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         streaming,
         description = "Create a new playlist. Pass track IDs to pre-populate, or omit for empty.",
         params(
@@ -188,7 +188,7 @@ impl PlaylistHub {
     }
 
     /// List all saved playlists
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         streaming,
         description = "List all saved playlists with summary info"
     )]
@@ -236,7 +236,7 @@ impl PlaylistHub {
     }
 
     /// Get full playlist info (metadata + tracks) — suitable for UI rendering
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         streaming,
         description = "Get full playlist details: name, description, track count, timestamps, then all tracks",
         params(name = "Playlist name")
@@ -264,7 +264,7 @@ impl PlaylistHub {
     }
 
     /// Delete a playlist
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Delete a saved playlist",
         params(name = "Playlist name")
     )]
@@ -289,7 +289,7 @@ impl PlaylistHub {
     }
 
     /// Rename a playlist
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Rename a playlist",
         params(name = "Current playlist name", new_name = "New playlist name")
     )]
@@ -330,7 +330,7 @@ impl PlaylistHub {
     }
 
     /// Add a track to a playlist by ID
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Fetch track info and append to a playlist",
         params(
             name = "Playlist name",
@@ -386,7 +386,7 @@ impl PlaylistHub {
     }
 
     /// Remove a track from a playlist by index
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Remove a track at a given index from a playlist",
         params(name = "Playlist name", index = "0-based index of the track to remove")
     )]
@@ -425,7 +425,7 @@ impl PlaylistHub {
     }
 
     /// Set or update a playlist's description
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Set or update the description of a playlist",
         params(name = "Playlist name", description = "New description text")
     )]
@@ -453,7 +453,7 @@ impl PlaylistHub {
     }
 
     /// Reorder a track within a playlist
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Move a track within a playlist from one position to another",
         params(
             name = "Playlist name",
@@ -499,7 +499,7 @@ impl PlaylistHub {
     }
 
     /// Load a playlist into the queue and start playing
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Load playlist tracks into the playback queue and start playing",
         params(name = "Playlist name")
     )]
@@ -536,7 +536,7 @@ impl PlaylistHub {
     }
 
     /// Save the current queue as a playlist
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Save the current playback queue as a named playlist (creates or overwrites)",
         params(name = "Playlist name")
     )]
@@ -575,7 +575,7 @@ impl PlaylistHub {
     }
 
     /// Save AI research data associated with a playlist
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Save research data (search suggestions, all found tracks, Claude output) for a playlist",
         params(
             name = "Playlist name this research is associated with",
@@ -600,7 +600,7 @@ impl PlaylistHub {
     }
 
     /// Get research data for a playlist
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Retrieve saved research data for a playlist",
         params(name = "Playlist name")
     )]

@@ -81,7 +81,7 @@ impl ChildRouter for PlayerHub {
 }
 
 #[allow(clippy::unused_async)]
-#[plexus_macros::hub_methods(
+#[plexus_macros::activation(
     namespace = "player",
     version = "0.3.0",
     hub,
@@ -90,7 +90,7 @@ impl ChildRouter for PlayerHub {
 )]
 impl PlayerHub {
     /// Play a track immediately (stops current playback)
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Play a track through speakers. Stops any current playback.",
         params(
             id = "Track ID",
@@ -116,7 +116,7 @@ impl PlayerHub {
     }
 
     /// Pause playback
-    #[plexus_macros::hub_method(description = "Pause the current playback")]
+    #[plexus_macros::method(description = "Pause the current playback")]
     pub async fn pause(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let player = self.player.clone();
         stream! {
@@ -129,7 +129,7 @@ impl PlayerHub {
     }
 
     /// Resume playback
-    #[plexus_macros::hub_method(description = "Resume paused playback")]
+    #[plexus_macros::method(description = "Resume paused playback")]
     pub async fn resume(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let player = self.player.clone();
         stream! {
@@ -142,7 +142,7 @@ impl PlayerHub {
     }
 
     /// Stop playback
-    #[plexus_macros::hub_method(description = "Stop playback and clear current track")]
+    #[plexus_macros::method(description = "Stop playback and clear current track")]
     pub async fn stop(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let player = self.player.clone();
         stream! {
@@ -155,7 +155,7 @@ impl PlayerHub {
     }
 
     /// Skip to next track in queue
-    #[plexus_macros::hub_method(description = "Skip to the next track in the queue")]
+    #[plexus_macros::method(description = "Skip to the next track in the queue")]
     pub async fn next(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let player = self.player.clone();
         stream! {
@@ -170,7 +170,7 @@ impl PlayerHub {
     }
 
     /// Go to previous track
-    #[plexus_macros::hub_method(description = "Go back to the previous track")]
+    #[plexus_macros::method(description = "Go back to the previous track")]
     pub async fn previous(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let player = self.player.clone();
         stream! {
@@ -185,7 +185,7 @@ impl PlayerHub {
     }
 
     /// Set volume level
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Set playback volume",
         params(level = "Volume level from 0.0 (mute) to 1.0 (full)")
     )]
@@ -201,7 +201,7 @@ impl PlayerHub {
     }
 
     /// Set pre-amp gain level
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Set pre-amp gain. Values above 1.0 boost the signal (max 4.0). Effective volume = preamp × volume.",
         params(level = "Gain level from 0.0 (silent) to 4.0 (4× boost)")
     )]
@@ -217,7 +217,7 @@ impl PlayerHub {
     }
 
     /// Add an entire album to the playback queue
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         streaming,
         description = "Add all tracks from an album to the queue. Auto-starts if nothing is playing.",
         params(
@@ -252,7 +252,7 @@ impl PlayerHub {
     }
 
     /// Add a track to the playback queue
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Add a track to the end of the playback queue. Auto-starts if nothing is playing.",
         params(
             id = "Track ID",
@@ -280,7 +280,7 @@ impl PlayerHub {
     }
 
     /// Add a track to play next (front of queue)
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Add a track to the front of the queue (play next). Auto-starts if nothing is playing.",
         params(
             id = "Track ID",
@@ -308,7 +308,7 @@ impl PlayerHub {
     }
 
     /// Add multiple tracks to the queue at once
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         streaming,
         description = "Add multiple tracks by ID in one call. Resolves metadata in parallel. Auto-starts if nothing is playing.",
         params(
@@ -342,7 +342,7 @@ impl PlayerHub {
     }
 
     /// Clear the playback queue
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Clear all tracks from the queue (does not stop current track)"
     )]
     pub async fn queue_clear(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
@@ -357,7 +357,7 @@ impl PlayerHub {
     }
 
     /// Start shuffle radio mode
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Start shuffle radio mode from given track sources. Randomly picks tracks from the pool, showing 1-2 upcoming at a time.",
         params(
             albums = "Album IDs to include in the shuffle pool",
@@ -430,7 +430,7 @@ impl PlayerHub {
     }
 
     /// Stop shuffle radio mode
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Stop shuffle radio mode. Leaves current track playing."
     )]
     pub async fn shuffle_stop(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
@@ -445,7 +445,7 @@ impl PlayerHub {
     }
 
     /// List queue contents
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Get the current queue contents including the now-playing track"
     )]
     pub async fn queue_get(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
@@ -466,7 +466,7 @@ impl PlayerHub {
     }
 
     /// Reorder tracks in the queue
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Move a track within the queue",
         params(
             from = "Source index in the queue (0-based)",
@@ -491,7 +491,7 @@ impl PlayerHub {
     }
 
     /// Get current playback status (single snapshot, returns immediately)
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Get current playback status — track, position, volume, queue length"
     )]
     pub async fn status(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
@@ -518,7 +518,7 @@ impl PlayerHub {
     }
 
     /// Seek to a position in the current track
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Seek to a position in the current track",
         params(position_secs = "Position in seconds to seek to")
     )]
@@ -536,7 +536,7 @@ impl PlayerHub {
     }
 
     /// Stream now-playing updates (~1s while playing)
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         streaming,
         description = "Stream real-time playback position and status updates (~1s interval while playing)"
     )]
@@ -587,7 +587,7 @@ impl PlayerHub {
     }
 
     /// Get buffered waveform peak history for instant rendering on connect
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Get buffered peak history (~2048 samples at 30fps ≈ 68s) for instant waveform rendering"
     )]
     pub async fn waveform(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
@@ -600,7 +600,7 @@ impl PlayerHub {
     }
 
     /// Stream live audio peak levels at ~30fps for waveform visualization
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         streaming,
         description = "Stream real-time audio peak levels (~30fps) for waveform visualization"
     )]
@@ -617,7 +617,7 @@ impl PlayerHub {
     }
 
     /// Get listening stats for a specific track
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Get per-track listening statistics (play count, skip count, total listen time)",
         params(id = "Track ID")
     )]
@@ -645,7 +645,7 @@ impl PlayerHub {
     }
 
     /// Get top most-played tracks
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         streaming,
         description = "Get top N most-played tracks sorted by play count",
         params(limit = "Number of tracks to return (default 10)")
@@ -676,7 +676,7 @@ impl PlayerHub {
     }
 
     /// Get most recently played tracks
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         streaming,
         description = "Get the most recent listen events (newest first)",
         params(limit = "Number of events to return (default 10)")
@@ -701,7 +701,7 @@ impl PlayerHub {
     }
 
     /// Stream full listen log
-    #[plexus_macros::hub_method(streaming, description = "Stream the full listen history log")]
+    #[plexus_macros::method(streaming, description = "Stream the full listen history log")]
     pub async fn history(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
         let player = self.player.clone();
         stream! {
@@ -718,7 +718,7 @@ impl PlayerHub {
     }
 
     /// Clear listen history log
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Clear the listen history log (aggregate stats are preserved)"
     )]
     pub async fn history_clear(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
@@ -733,7 +733,7 @@ impl PlayerHub {
     }
 
     /// Toggle like on a track
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Toggle like/heart on a track. Returns the new liked state.",
         params(
             id = "Track ID",
@@ -758,7 +758,7 @@ impl PlayerHub {
     }
 
     /// Get all liked track IDs
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Get all liked track IDs (most recently liked first)"
     )]
     pub async fn liked_tracks(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
@@ -789,7 +789,7 @@ impl PlayerHub {
     }
 
     /// Download a track to local storage
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         streaming,
         description = "Download a track to ~/Music/mono-tray/{artist}/{album}/ and register for offline playback",
         params(
@@ -825,7 +825,7 @@ impl PlayerHub {
     }
 
     /// Delete a downloaded track from local storage
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Delete a downloaded track from local storage and remove the file",
         params(id = "Track ID (if omitted, uses current track)")
     )]
@@ -856,7 +856,7 @@ impl PlayerHub {
     }
 
     /// Get playback history (previously played tracks)
-    #[plexus_macros::hub_method(
+    #[plexus_macros::method(
         description = "Get the list of previously played tracks (most recent last, frontend reverses)"
     )]
     pub async fn history_list(&self) -> impl Stream<Item = MonoEvent> + Send + 'static {
